@@ -344,6 +344,9 @@ static void *janus_streaming_ondemand_thread(void *data);
 static void *janus_streaming_filesource_thread(void *data);
 static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data);
 static void *janus_streaming_relay_thread(void *data);
+static gboolean janus_streaming_is_sei(gint codec, char* buffer, int len);
+static gboolean janus_streaming_is_sps(gint codec, char* buffer, int len);
+static gboolean janus_streaming_is_pps(gint codec, char* buffer, int len);
 
 typedef enum janus_streaming_type {
 	janus_streaming_type_none = 0,
@@ -373,6 +376,8 @@ typedef struct janus_streaming_buffer {
 	size_t size;
 } janus_streaming_buffer;
 #endif
+
+typedef struct janus_streaming_rtp_relay_packet;
 
 typedef struct janus_streaming_rtp_source {
 	gint audio_port;
@@ -411,6 +416,9 @@ typedef struct janus_streaming_rtp_source {
 	janus_network_address audio_iface;
 	janus_network_address video_iface;
 	janus_network_address data_iface;
+	struct janus_streaming_rtp_relay_packet* sei;
+	struct janus_streaming_rtp_relay_packet* sps;
+	struct janus_streaming_rtp_relay_packet* pps;
 } janus_streaming_rtp_source;
 
 typedef struct janus_streaming_file_source {
@@ -2323,6 +2331,19 @@ void janus_streaming_setup_media(janus_plugin_session *handle) {
 		janus_streaming_rtp_source *source = mountpoint->source;
 		if(source->keyframe.enabled) {
 			JANUS_LOG(LOG_HUGE, "Any keyframe to send?\n");
+			if (source->sei != NULL) {
+				JANUS_LOG(LOG_HUGE, "Yep! SEI\n");
+				janus_streaming_relay_rtp_packet(session, source->sei);
+			}
+			if (source->pps != NULL) {
+				JANUS_LOG(LOG_HUGE, "Yep! PPS\n");
+				janus_streaming_relay_rtp_packet(session, source->pps);
+			}
+			if (source->sps != NULL) {
+				JANUS_LOG(LOG_HUGE, "Yep! SPS\n");
+				janus_streaming_relay_rtp_packet(session, source->sps);
+			}
+			
 			janus_mutex_lock(&source->keyframe.mutex);
 			if(source->keyframe.latest_keyframe != NULL) {
 				JANUS_LOG(LOG_HUGE, "Yep! %d packets\n", g_list_length(source->keyframe.latest_keyframe));
@@ -3725,11 +3746,13 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 	live_rtsp_source->data_fd = -1;
 	live_rtsp_source->data_iface = nil;
 	live_rtsp_source->reconnect_timer = 0;
+	live_rtsp_source->keyframe.enabled = TRUE;
 	janus_mutex_init(&live_rtsp_source->rtsp_mutex);
 	live_rtsp->source = live_rtsp_source;
 	live_rtsp->source_destroy = (GDestroyNotify) janus_streaming_rtp_source_free;
 	live_rtsp->listeners = NULL;
 	live_rtsp->destroyed = 0;
+	live_rtsp->codecs.video_codec = JANUS_STREAMING_H264;
 	janus_mutex_init(&live_rtsp->mutex);
 	/* Now connect to the RTSP server */
 	if(janus_streaming_rtsp_connect_to_server(live_rtsp) < 0) {
@@ -4337,6 +4360,57 @@ static void *janus_streaming_relay_thread(void *data) {
 							pkt->seq_number = ntohs(rtp->seq_number);
 							source->keyframe.temp_keyframe = g_list_append(source->keyframe.temp_keyframe, pkt);
 							janus_mutex_unlock(&source->keyframe.mutex);
+						} else if (janus_streaming_is_sei(mountpoint->codecs.video_codec, buffer, bytes)) {
+							if (source->sei) {
+								g_free(source->sei);
+							}
+							janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
+							pkt->data = g_malloc0(bytes);
+							memcpy(pkt->data, buffer, bytes);
+							pkt->data->ssrc = htons(1);
+							pkt->data->type = mountpoint->codecs.video_pt;
+							packet.is_rtp = TRUE;
+							packet.is_video = TRUE;
+							packet.is_keyframe = TRUE;
+							pkt->length = bytes;
+							pkt->timestamp = ntohl(rtp->timestamp);
+							pkt->seq_number = ntohs(rtp->seq_number);
+							source->sei = pkt;
+							JANUS_LOG(LOG_HUGE, "[%s] Saved SEI ts=%"SCNu32"\n", name, pkt->timestamp);
+						}  else if (janus_streaming_is_pps(mountpoint->codecs.video_codec, buffer, bytes)) {
+							if (source->pps) {
+								g_free(source->pps);
+							}
+							janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
+							pkt->data = g_malloc0(bytes);
+							memcpy(pkt->data, buffer, bytes);
+							pkt->data->ssrc = htons(1);
+							pkt->data->type = mountpoint->codecs.video_pt;
+							packet.is_rtp = TRUE;
+							packet.is_video = TRUE;
+							packet.is_keyframe = TRUE;
+							pkt->length = bytes;
+							pkt->timestamp = ntohl(rtp->timestamp);
+							pkt->seq_number = ntohs(rtp->seq_number);
+							source->pps = pkt;
+							JANUS_LOG(LOG_HUGE, "[%s] Saved PPS ts=%"SCNu32"\n", name, pkt->timestamp);
+						}  else if (janus_streaming_is_sps(mountpoint->codecs.video_codec, buffer, bytes)) {
+							if (source->sps) {
+								g_free(source->sps);
+							}
+							janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
+							pkt->data = g_malloc0(bytes);
+							memcpy(pkt->data, buffer, bytes);
+							pkt->data->ssrc = htons(1);
+							pkt->data->type = mountpoint->codecs.video_pt;
+							packet.is_rtp = TRUE;
+							packet.is_video = TRUE;
+							packet.is_keyframe = TRUE;
+							pkt->length = bytes;
+							pkt->timestamp = ntohl(rtp->timestamp);
+							pkt->seq_number = ntohs(rtp->seq_number);
+							source->sps = pkt;
+							JANUS_LOG(LOG_HUGE, "[%s] Saved SPS ts=%"SCNu32"\n", name, pkt->timestamp);
 						} else {
 							gboolean kf = FALSE;
 							/* Parse RTP header first */
@@ -4660,4 +4734,47 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 	}
 
 	return;
+}
+
+static gboolean janus_streaming_is_nal_type(gint codec, char* buffer, int len, uint8_t type) {
+	if(codec == JANUS_STREAMING_H264) {
+		/* Parse RTP header first */
+		rtp_header *header = (rtp_header *)buffer;
+		guint32 timestamp = ntohl(header->timestamp);
+		guint16 seq = ntohs(header->seq_number);
+		// JANUS_LOG(LOG_HUGE, "Checking if H264 packet (size=%d, seq=%"SCNu16", ts=%"SCNu32") is a key frame...\n", len, seq, timestamp);
+		int plen = 0;
+		buffer = janus_rtp_payload(buffer, len, &plen);
+		if(!buffer) {
+			JANUS_LOG(LOG_WARN, "Couldn't access RTP payload\n");
+			return FALSE;
+		}
+		/* Parse H264 header now */
+		uint8_t fragment = *buffer & 0x1F;
+		uint8_t nal = *(buffer+1) & 0x1F;
+		uint8_t start_bit = *(buffer+1) & 0x80;
+		// JANUS_LOG(LOG_HUGE, "Fragment=%d, NAL=%d, Start=%d\n", fragment, nal, start_bit);
+		if(fragment == type ||
+				((fragment == 28 || fragment == 29) && nal == type && start_bit == 128)) {
+			JANUS_LOG(LOG_HUGE, "Got an H264 key frame\n");
+			return TRUE;
+		}
+		/* If we got here it's not a key frame */
+		return FALSE;
+	} else {
+		/* FIXME Not a clue */
+		return FALSE;
+	}
+}
+
+static gboolean janus_streaming_is_sei(gint codec, char* buffer, int len) {
+	return janus_streaming_is_nal_type(codec, buffer, len, 6);
+}
+
+static gboolean janus_streaming_is_sps(gint codec, char* buffer, int len) {
+	return janus_streaming_is_nal_type(codec, buffer, len, 7);
+}
+
+static gboolean janus_streaming_is_pps(gint codec, char* buffer, int len) {
+	return janus_streaming_is_nal_type(codec, buffer, len, 8);
 }
