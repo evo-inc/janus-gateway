@@ -104,6 +104,10 @@ static struct janus_json_parameter add_token_parameters[] = {
 	{"token", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"plugins", JSON_ARRAY, 0}
 };
+static struct janus_json_parameter set_tokens_parameters[] = {
+	{"tokens", JSON_ARRAY, JANUS_JSON_PARAM_REQUIRED},
+	{"plugins", JSON_ARRAY, 0}
+};
 static struct janus_json_parameter token_parameters[] = {
 	{"token", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
 };
@@ -2128,12 +2132,124 @@ int janus_process_incoming_admin_request(janus_request *request) {
 			/* Send the success reply */
 			ret = janus_process_success(request, reply);
 			goto jsondone;
+		} else if(!strcasecmp(message_text, "set_tokens")) {
+			/* Add a token valid for authentication */
+			if(!janus_auth_is_enabled()) {
+				ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Token based authentication disabled");
+				goto jsondone;
+			}
+			JANUS_VALIDATE_JSON_OBJECT(root, set_tokens_parameters,
+				error_code, error_cause, FALSE,
+				JANUS_ERROR_MISSING_MANDATORY_ELEMENT, JANUS_ERROR_INVALID_ELEMENT_TYPE);
+			if(error_code != 0) {
+				ret = janus_process_error_string(request, session_id, transaction_text, error_code, error_cause);
+				goto jsondone;
+			}
+			
+			GList *list = janus_auth_list_tokens();
+			if(list != NULL) {
+				GList *tmp = list;
+				while(tmp) {
+					char *token = (char *)tmp->data;
+					if(token != NULL) {
+						janus_auth_remove_token(token);
+						tmp->data = NULL;
+						g_free(token);
+					}
+					tmp = tmp->next;
+				}
+				g_list_free(list);
+			}
+			
+			
+			json_t *tokens = json_object_get(root, "tokens");
+			size_t i = 0;
+			for(i=0; i<json_array_size(tokens); i++) {
+				json_t *t = json_array_get(tokens, i);
+				if(!t || !json_is_string(t)) {
+					/* FIXME Should we fail here? */
+					JANUS_LOG(LOG_WARN, "Invalid token passed to the new token request, skipping...\n");
+					continue;
+				}
+				const char *token_value = json_string_value(t);
+				/* First of all, add the new token */
+				if(!janus_auth_add_token(token_value)) {
+					//ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNKNOWN, "Error adding token");
+					//goto jsondone;
+					JANUS_LOG(LOG_WARN, "Error adding token %s, skipping...\n", token_value);
+					continue;
+				}
+			}
+			/* Any plugin this token should be limited to? */
+			json_t *allowed = json_object_get(root, "plugins");
+			/* Then take care of the plugins access limitations, if any */
+			if(allowed && json_array_size(allowed) > 0) {
+				/* Specify which plugins this token has access to */
+				size_t i = 0;
+				for(i=0; i<json_array_size(allowed); i++) {
+					json_t *p = json_array_get(allowed, i);
+					if(!p || !json_is_string(p)) {
+						/* FIXME Should we fail here? */
+						JANUS_LOG(LOG_WARN, "Invalid plugin passed to the new token request, skipping...\n");
+						continue;
+					}
+					const gchar *plugin_text = json_string_value(p);
+					janus_plugin *plugin_t = janus_plugin_find(plugin_text);
+					if(plugin_t == NULL) {
+						/* FIXME Should we fail here? */
+						JANUS_LOG(LOG_WARN, "No such plugin '%s' passed to the new token request, skipping...\n", plugin_text);
+						continue;
+					}
+					for(i=0; i<json_array_size(tokens); i++) {
+						json_t *t = json_array_get(tokens, i);
+						if(!t || !json_is_string(t)) {
+							continue;
+						}
+						const char *token_value = json_string_value(t);
+						/* First of all, add the new token */
+						if(!janus_auth_allow_plugin(token_value, plugin_t)) {
+							JANUS_LOG(LOG_WARN, "Error allowing access to '%s' to the '%s', bad things may happen...\n", plugin_text, token_value);
+						}
+					}
+				}
+			} else {
+				/* No plugin limitation specified, allow all plugins */
+				if(plugins && g_hash_table_size(plugins) > 0) {
+					GHashTableIter iter;
+					gpointer value;
+					g_hash_table_iter_init(&iter, plugins);
+					while (g_hash_table_iter_next(&iter, NULL, &value)) {
+						janus_plugin *plugin_t = value;
+						if(plugin_t == NULL)
+							continue;
+						for(i=0; i<json_array_size(tokens); i++) {
+							json_t *t = json_array_get(tokens, i);
+							if(!t || !json_is_string(t)) {
+								continue;
+							}
+							const char *token_value = json_string_value(t);
+							/* First of all, add the new token */
+							if(!janus_auth_allow_plugin(token_value, plugin_t)) {
+								JANUS_LOG(LOG_WARN, "Error allowing access to '%s' to the '%s', bad things may happen...\n", plugin_t->get_package(), token_value);
+							}
+						}
+					}
+				}
+			}
+			/* Prepare JSON reply */
+			json_t *reply = json_object();
+			json_object_set_new(reply, "janus", json_string("success"));
+			json_object_set_new(reply, "transaction", json_string(transaction_text));
+			/* Send the success reply */
+			ret = janus_process_success(request, reply);
+			goto jsondone;
 		} else {
 			/* No message we know of */
 			ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_INVALID_REQUEST_PATH, "Unhandled request '%s' at this path", message_text);
 			goto jsondone;
 		}
 	}
+	
 	if(session_id < 1) {
 		JANUS_LOG(LOG_ERR, "Invalid session\n");
 		ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_SESSION_NOT_FOUND, NULL);
