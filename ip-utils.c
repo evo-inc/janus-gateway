@@ -19,6 +19,8 @@
 #include <net/if.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #include <glib.h>
 
@@ -234,6 +236,26 @@ int janus_network_string_to_address(janus_network_query_options addr_type, const
 	if((addr_type & janus_network_query_options_ipv6) && inet_pton(AF_INET6, user_value, &result->ipv6) > 0) {
 		result->family = AF_INET6;
 		return 0;
+	}
+	
+	if((addr_type & janus_network_query_options_ipv4)) {
+		struct addrinfo hint;
+		struct addrinfo* addr = NULL;
+		hint.ai_family = AF_INET;
+		int error = getaddrinfo(user_value, NULL, &hint, &addr);
+		if (error == 0) {
+			memcpy(&result->ipv4.s_addr, addr->ai_addr->sa_data, addr->ai_addrlen);
+			result->family = AF_INET;
+			freeaddrinfo(addr);
+			return 0;
+		} else {
+			if (error == EAI_SYSTEM) {
+				perror("getaddrinfo");
+			} else {
+				fprintf(stderr, "error in getaddrinfo: %s\n", gai_strerror(error));
+			}  
+		}
+		freeaddrinfo(addr);
 	}
 	return -EINVAL;
 }
