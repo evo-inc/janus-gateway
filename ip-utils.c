@@ -241,6 +241,7 @@ int janus_network_string_to_address(janus_network_query_options addr_type, const
 	if((addr_type & janus_network_query_options_ipv4)) {
 		struct addrinfo hint;
 		struct addrinfo* addr = NULL;
+		memset(&hint, 0, sizeof(hint));
 		hint.ai_family = AF_INET;
 		int error = getaddrinfo(user_value, NULL, &hint, &addr);
 		if (error == 0) {
