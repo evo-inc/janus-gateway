@@ -245,7 +245,7 @@ int janus_network_string_to_address(janus_network_query_options addr_type, const
 		hint.ai_family = AF_INET;
 		int error = getaddrinfo(user_value, NULL, &hint, &addr);
 		if (error == 0) {
-			memcpy(&result->ipv4.s_addr, addr->ai_addr->sa_data, addr->ai_addrlen);
+			janus_ip_copy_ipv4((struct sockaddr_in*)addr->ai_addr, &result->ipv4);
 			result->family = AF_INET;
 			freeaddrinfo(addr);
 			return 0;

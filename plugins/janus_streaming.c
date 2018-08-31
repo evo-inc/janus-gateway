@@ -2407,7 +2407,7 @@ void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char
 	}
 	if(session->destroyed)
 		return;
-	JANUS_LOG(LOG_VERB, "Received RTCP packet 3\n");
+	//JANUS_LOG(LOG_VERB, "Received RTCP packet 3\n");
 	
 	session->last_received_rtcp = janus_get_monotonic_time();
 	
