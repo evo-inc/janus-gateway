@@ -16,11 +16,14 @@
 #include <glib.h>
 #include <jansson.h>
 
+#define JANUS_JSON_STRING			JSON_STRING
+#define JANUS_JSON_INTEGER			JSON_INTEGER
+#define JANUS_JSON_OBJECT			JSON_OBJECT
 /* Use JANUS_JSON_BOOL instead of the non-existing JSON_BOOLEAN */
-#define JANUS_JSON_BOOL JSON_TRUE
-#define JANUS_JSON_PARAM_REQUIRED 1
-#define JANUS_JSON_PARAM_POSITIVE 2
-#define JANUS_JSON_PARAM_NONEMPTY 4
+#define JANUS_JSON_BOOL				JSON_TRUE
+#define JANUS_JSON_PARAM_REQUIRED	1
+#define JANUS_JSON_PARAM_POSITIVE	2
+#define JANUS_JSON_PARAM_NONEMPTY	4
 
 struct janus_json_parameter {
 	const gchar *name;
@@ -79,7 +82,7 @@ guint64 *janus_uint64_dup(guint64 num);
  */
 ///@{
 /*! \brief Janus flags container */
-typedef uint32_t janus_flags;
+typedef gsize janus_flags;
 
 /*! \brief Janus flags reset method
  * \param[in] flags The janus_flags instance to reset */
@@ -88,18 +91,18 @@ void janus_flags_reset(janus_flags *flags);
 /*! \brief Janus flags set method
  * \param[in] flags The janus_flags instance to update
  * \param[in] flag The flag to set */
-void janus_flags_set(janus_flags *flags, uint32_t flag);
+void janus_flags_set(janus_flags *flags, gsize flag);
 
 /*! \brief Janus flags clear method
  * \param[in] flags The janus_flags instance to update
  * \param[in] flag The flag to clear */
-void janus_flags_clear(janus_flags *flags, uint32_t flag);
+void janus_flags_clear(janus_flags *flags, gsize flag);
 
 /*! \brief Janus flags check method
  * \param[in] flags The janus_flags instance to check
  * \param[in] flag The flag to check
  * \returns true if the flag is set, false otherwise */
-gboolean janus_flags_is_set(janus_flags *flags, uint32_t flag);
+gboolean janus_flags_is_set(janus_flags *flags, gsize flag);
 ///@}
 
 /*! \brief Helper to create a new directory, and recursively create parent directories if needed
@@ -282,5 +285,40 @@ void janus_vp8_simulcast_descriptor_update(char *buffer, int len, janus_vp8_simu
 int janus_vp9_parse_svc(char *buffer, int len, int *found,
 		int *spatial_layer, int *temporal_layer,
 		uint8_t *p, uint8_t *d, uint8_t *u, uint8_t *b, uint8_t *e);
+
+/*! \brief Helper method to push individual bits at the end of a word
+ * @param[in] word Initial value of word
+ * @param[in] num Number of bits to push
+ * @param[in] val Value of bits to push
+ * @returns 0  New word value*/
+guint32 janus_push_bits(guint32 word, size_t num, guint32 val);
+
+/*! \brief Helper method to set one byte at a memory position
+ * @param[in] data memory data pointer
+ * @param[in] i position in memory to change
+ * @param[in] val value to write
+ */
+void janus_set1(guint8 *data, size_t i, guint8 val);
+
+/*! \brief Helper method to set two bytes at a memory position
+ * @param[in] data memory data pointer
+ * @param[in] i position in memory to change
+ * @param[in] val value to write
+ */
+void janus_set2(guint8 *data, size_t i, guint32 val);
+
+/*! \brief Helper method to set three bytes at a memory position
+ * @param[in] data memory data pointer
+ * @param[in] i position in memory to change
+ * @param[in] val value to write
+ */
+void janus_set3(guint8 *data, size_t i, guint32 val);
+
+/*! \brief Helper method to set four bytes at a memory position
+ * @param[in] data memory data pointer
+ * @param[in] i position in memory to change
+ * @param[in] val value to write
+ */
+void janus_set4(guint8 *data, size_t i, guint32 val);
 
 #endif

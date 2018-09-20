@@ -23,12 +23,12 @@
 // 		var server = "ws://" + window.location.hostname + ":8188";
 //
 // Of course this assumes that support for WebSockets has been built in
-// when compiling the gateway. WebSockets support has not been tested
+// when compiling the server. WebSockets support has not been tested
 // as much as the REST API, so handle with care!
 //
 //
 // If you have multiple options available, and want to let the library
-// autodetect the best way to contact your gateway (or pool of gateways),
+// autodetect the best way to contact your server (or pool of servers),
 // you can also pass an array of servers, e.g., to provide alternative
 // means of access (e.g., try WebSockets first and, if that fails, fall
 // back to plain HTTP) or just have failover servers:
@@ -52,8 +52,6 @@ else
 var janus = null;
 var screentest = null;
 var opaqueId = "screensharingtest-"+Janus.randomString(12);
-
-var started = false;
 
 var myusername = null;
 var myid = null;
@@ -82,10 +80,7 @@ $(document).ready(function() {
 	// Initialize the library (all console debuggers enabled)
 	Janus.init({debug: "all", callback: function() {
 		// Use a button to start the demo
-		$('#start').click(function() {
-			if(started)
-				return;
-			started = true;
+		$('#start').one('click', function() {
 			$(this).attr('disabled', true).unbind('click');
 			// Make sure the browser supports WebRTC
 			if(!Janus.isWebrtcSupported()) {
@@ -143,11 +138,18 @@ $(document).ready(function() {
 								webrtcState: function(on) {
 									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
 									$("#screencapture").parent().unblock();
-									bootbox.alert("Your screen sharing session just started: pass the <b>" + room + "</b> session identifier to those who want to attend.");
+									if(on) {
+										bootbox.alert("Your screen sharing session just started: pass the <b>" + room + "</b> session identifier to those who want to attend.");
+									} else {
+										bootbox.alert("Your screen sharing session just stopped.", function() {
+											janus.destroy();
+											window.location.reload();
+										});
+									}
 								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message (publisher) :::");
-									Janus.debug(JSON.stringify(msg));
+									Janus.debug(msg);
 									var event = msg["videoroom"];
 									Janus.debug("Event: " + event);
 									if(event != undefined && event != null) {
@@ -221,21 +223,24 @@ $(document).ready(function() {
 								},
 								onlocalstream: function(stream) {
 									Janus.debug(" ::: Got a local stream :::");
-									Janus.debug(JSON.stringify(stream));
+									Janus.debug(stream);
 									$('#screenmenu').hide();
 									$('#room').removeClass('hide').show();
 									if($('#screenvideo').length === 0) {
 										$('#screencapture').append('<video class="rounded centered" id="screenvideo" width="100%" height="100%" autoplay muted="muted"/>');
 									}
 									Janus.attachMediaStream($('#screenvideo').get(0), stream);
-									$("#screencapture").parent().block({
-										message: '<b>Publishing...</b>',
-										css: {
-											border: 'none',
-											backgroundColor: 'transparent',
-											color: 'white'
-										}
-									});
+									if(screentest.webrtcStuff.pc.iceConnectionState !== "completed" &&
+											screentest.webrtcStuff.pc.iceConnectionState !== "connected") {
+										$("#screencapture").parent().block({
+											message: '<b>Publishing...</b>',
+											css: {
+												border: 'none',
+												backgroundColor: 'transparent',
+												color: 'white'
+											}
+										});
+									}
 								},
 								onremotestream: function(stream) {
 									// The publisher stream is sendonly, we don't expect anything here
@@ -272,20 +277,9 @@ function checkEnterShare(field, event) {
 	}
 }
 
-function switchToHttps() {
-	window.location.href = "https:" + window.location.href.substring(window.location.protocol.length);
-	return false;
-}
-
 function preShareScreen() {
-	// Make sure HTTPS is being used
-	if(window.location.protocol !== 'https:') {
-		bootbox.alert('Sharing your screen only works on HTTPS: click <b><a href="#" onclick="return switchToHttps();">here</a></b> to try the https:// version of this page');
-		$('#start').attr('disabled', true);
-		return;
-	}
 	if(!Janus.isExtensionEnabled()) {
-		bootbox.alert("You're using a recent version of Chrome but don't have the screensharing extension installed: click <b><a href='https://chrome.google.com/webstore/detail/janus-webrtc-screensharin/hapfgfdkleiggjjpfpenajgdnfckjpaj' target='_blank'>here</a></b> to do so", function() {
+		bootbox.alert("You're using Chrome but don't have the screensharing extension installed: click <b><a href='https://chrome.google.com/webstore/detail/janus-webrtc-screensharin/hapfgfdkleiggjjpfpenajgdnfckjpaj' target='_blank'>here</a></b> to do so", function() {
 			window.location.reload();
 		});
 		return;
@@ -343,7 +337,7 @@ function shareScreen() {
 	// Create a new room
 	var desc = $('#desc').val();
 	role = "publisher";
-	var create = { "request": "create", "description": desc, "bitrate": 0, "publishers": 1 };
+	var create = { "request": "create", "description": desc, "bitrate": 500000, "publishers": 1 };
 	screentest.send({"message": create, success: function(result) {
 		var event = result["videoroom"];
 		Janus.debug("Event: " + event);
@@ -412,7 +406,7 @@ function newRemoteFeed(id, display) {
 			},
 			onmessage: function(msg, jsep) {
 				Janus.debug(" ::: Got a message (listener) :::");
-				Janus.debug(JSON.stringify(msg));
+				Janus.debug(msg);
 				var event = msg["videoroom"];
 				Janus.debug("Event: " + event);
 				if(event != undefined && event != null) {
@@ -460,15 +454,15 @@ function newRemoteFeed(id, display) {
 					// No remote video yet
 					$('#screencapture').append('<video class="rounded centered" id="waitingvideo" width="100%" height="100%" />');
 					$('#screencapture').append('<video class="rounded centered hide" id="screenvideo" width="100%" height="100%" autoplay/>');
+					// Show the video, hide the spinner and show the resolution when we get a playing event
+					$("#screenvideo").bind("playing", function () {
+						$('#waitingvideo').remove();
+						$('#screenvideo').removeClass('hide');
+						if(spinner !== null && spinner !== undefined)
+							spinner.stop();
+						spinner = null;
+					});
 				}
-				// Show the video, hide the spinner and show the resolution when we get a playing event
-				$("#screenvideo").bind("playing", function () {
-					$('#waitingvideo').remove();
-					$('#screenvideo').removeClass('hide');
-					if(spinner !== null && spinner !== undefined)
-						spinner.stop();
-					spinner = null;
-				});
 				Janus.attachMediaStream($('#screenvideo').get(0), stream);
 			},
 			oncleanup: function() {

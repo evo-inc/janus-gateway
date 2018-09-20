@@ -21,12 +21,16 @@
 ;    The following options are only valid for the 'rtp' type:
 ; data = yes|no (do/don't stream text via datachannels)
 ; audioport = local port for receiving audio frames
-; audiomcast = multicast group port for receiving audio frames, if any
+; audiortcpport = local port, if any, for receiving and sending audio RTCP feedback
+; audiomcast = multicast group for receiving audio frames, if any
 ; audioiface = network interface or IP address to bind to, if any (binds to all otherwise)
 ; audiopt = <audio RTP payload type> (e.g., 111)
 ; audiortpmap = RTP map of the audio codec (e.g., opus/48000/2)
+; audioskew = yes|no (whether the plugin should perform skew
+;		analisys and compensation on incoming audio RTP stream, EXPERIMENTAL)
 ; videoport = local port for receiving video frames
-; videomcast = multicast group port for receiving video frames, if any
+; videortcpport = local port, if any, for receiving and sending video RTCP feedback
+; videomcast = multicast group for receiving video frames, if any
 ; videoiface = network interface or IP address to bind to, if any (binds to all otherwise)
 ; videopt = <video RTP payload type> (e.g., 100)
 ; videortpmap = RTP map of the video codec (e.g., VP8/90000)
@@ -35,16 +39,40 @@
 ; videosimulcast = yes|no (do|don't enable video simulcasting)
 ; videoport2 = second local port for receiving video frames (only for rtp, and simulcasting)
 ; videoport3 = third local port for receiving video frames (only for rtp, and simulcasting)
+; videoskew = yes|no (whether the plugin should perform skew
+;		analisys and compensation on incoming video RTP stream, EXPERIMENTAL)
+; videosvc = yes|no (whether the video will have SVC support; works only for VP9-SVC, default=no)
+; collision = in case of collision (more than one SSRC hitting the same port), the plugin
+;		will discard incoming RTP packets with a new SSRC unless this many milliseconds
+;		passed, which would then change the current SSRC (0=disabled)
 ; dataport = local port for receiving data messages to relay
 ; dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
 ; databuffermsg = yes|no (whether the plugin should store the latest
 ;		message and send it immediately for new viewers)
+; threads = number of threads to assist with the relaying part, which can help
+;		if you expect a lot of viewers that may cause the RTP receiving part
+;		in the Streaming plugin to slow down and fail to catch up (default=0)
+;
+; In case you want to use SRTP for your RTP-based mountpoint, you'll need
+; to configure the SRTP-related properties as well, namely the suite to
+; use for hashing (32 or 80) and the crypto information for decrypting
+; the stream (as a base64 encoded string the way SDES does it). Notice
+; that with SRTP involved you'll have to pay extra attention to what you
+; feed the mountpoint, as you may risk getting SRTP decrypt errors:
+; srtpsuite = 32
+; srtpcrypto = WbTBosdVUZqEb6Htqhn+m3z7wUh4RJVR8nE15GbN
 ;
 ; The following options are only valid for the 'rstp' type:
-; url = RTSP stream URL (only for restreaming RTSP)
-; rtsp_user = RTSP authorization username (only if type=rtsp)
-; rtsp_pwd = RTSP authorization password (only if type=rtsp)
+; url = RTSP stream URL
+; rtsp_user = RTSP authorization username, if needed
+; rtsp_pwd = RTSP authorization password, if needed
+; rtsp_failcheck = whether an error should be returned if connecting to the RTSP server fails (default=yes)
 ; rtspiface = network interface or IP address to bind to, if any (binds to all otherwise), when receiving RTSP streams
+;
+; Notice that, for 'rtsp' mountpoints, normally the plugin uses the exact
+; SDP rtpmap and fmtp attributes the remote camera or RTSP server sent.
+; In case the values set remotely are known to conflict with WebRTC viewers,
+; you can override both using the settings introduced above.
 ;
 ; To test the [gstreamer-sample] example, check the test_gstreamer.sh
 ; script in the plugins/streams folder. To test the live and on-demand
@@ -132,6 +160,7 @@ secret = adminpwd
 ; authentication will only work if you installed libcurl >= 7.45.0)
 ; NOTE WELL: the plugin does NOT transcode, so the RTSP stream MUST be
 ; in a format the browser can digest (e.g., VP8 or H.264 baseline for video)
+; Again, you can override rtpmap and/or fmtp, if needed
 ;
 ;[rtsp-test]
 ;type = rtsp

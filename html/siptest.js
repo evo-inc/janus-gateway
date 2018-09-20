@@ -23,12 +23,12 @@
 // 		var server = "ws://" + window.location.hostname + ":8188";
 //
 // Of course this assumes that support for WebSockets has been built in
-// when compiling the gateway. WebSockets support has not been tested
+// when compiling the server. WebSockets support has not been tested
 // as much as the REST API, so handle with care!
 //
 //
 // If you have multiple options available, and want to let the library
-// autodetect the best way to contact your gateway (or pool of gateways),
+// autodetect the best way to contact your server (or pool of servers),
 // you can also pass an array of servers, e.g., to provide alternative
 // means of access (e.g., try WebSockets first and, if that fails, fall
 // back to plain HTTP) or just have failover servers:
@@ -52,7 +52,6 @@ var janus = null;
 var sipcall = null;
 var opaqueId = "siptest-"+Janus.randomString(12);
 
-var started = false;
 var spinner = null;
 
 var selectedApproach = null;
@@ -65,10 +64,7 @@ $(document).ready(function() {
 	// Initialize the library (all console debuggers enabled)
 	Janus.init({debug: "all", callback: function() {
 		// Use a button to start the demo
-		$('#start').click(function() {
-			if(started)
-				return;
-			started = true;
+		$('#start').one('click', function() {
 			$(this).attr('disabled', true).unbind('click');
 			// Make sure the browser supports WebRTC
 			if(!Janus.isWebrtcSupported()) {
@@ -146,9 +142,16 @@ $(document).ready(function() {
 										$.unblockUI();
 									}
 								},
+								mediaState: function(medium, on) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								},
+								webrtcState: function(on) {
+									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
+									$("#videoleft").parent().unblock();
+								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message :::");
-									Janus.debug(JSON.stringify(msg));
+									Janus.debug(msg);
 									// Any error?
 									var error = msg["error"];
 									if(error != null && error != undefined) {
@@ -261,7 +264,10 @@ $(document).ready(function() {
 																		//		var body = { request: "accept", srtp: "sdes_mandatory" };
 																		// This way you'll tell the plugin to accept the call, but ONLY
 																		// if SDES is available, and you don't want plain RTP. If it
-																		// is not available, you'll get an error (452) back.
+																		// is not available, you'll get an error (452) back. You can
+																		// also specify the SRTP profile to negotiate by setting the
+																		// "srtp_profile" property accordingly (the default if not
+																		// set in the request is "AES_CM_128_HMAC_SHA1_80")
 																		sipcall.send({"message": body, "jsep": jsep});
 																		$('#call').removeAttr('disabled').html('Hangup')
 																			.removeClass("btn-success").addClass("btn-danger")
@@ -325,34 +331,50 @@ $(document).ready(function() {
 								},
 								onlocalstream: function(stream) {
 									Janus.debug(" ::: Got a local stream :::");
-									Janus.debug(JSON.stringify(stream));
+									Janus.debug(stream);
 									$('#videos').removeClass('hide').show();
 									if($('#myvideo').length === 0)
 										$('#videoleft').append('<video class="rounded centered" id="myvideo" width=320 height=240 autoplay muted="muted"/>');
 									Janus.attachMediaStream($('#myvideo').get(0), stream);
 									$("#myvideo").get(0).muted = "muted";
-									// No remote video yet
-									$('#videoright').append('<video class="rounded centered" id="waitingvideo" width=320 height=240 />');
-									if(spinner == null) {
-										var target = document.getElementById('videoright');
-										spinner = new Spinner({top:100}).spin(target);
-									} else {
-										spinner.spin();
+									if(sipcall.webrtcStuff.pc.iceConnectionState !== "completed" &&
+											sipcall.webrtcStuff.pc.iceConnectionState !== "connected") {
+										$("#videoleft").parent().block({
+											message: '<b>Calling...</b>',
+											css: {
+												border: 'none',
+												backgroundColor: 'transparent',
+												color: 'white'
+											}
+										});
+										// No remote video yet
+										$('#videoright').append('<video class="rounded centered" id="waitingvideo" width=320 height=240 />');
+										if(spinner == null) {
+											var target = document.getElementById('videoright');
+											spinner = new Spinner({top:100}).spin(target);
+										} else {
+											spinner.spin();
+										}
 									}
 									var videoTracks = stream.getVideoTracks();
 									if(videoTracks === null || videoTracks === undefined || videoTracks.length === 0) {
 										// No webcam
 										$('#myvideo').hide();
-										$('#videoleft').append(
-											'<div class="no-video-container">' +
-												'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-												'<span class="no-video-text">No webcam available</span>' +
-											'</div>');
+										if($('#videoleft .no-video-container').length === 0) {
+											$('#videoleft').append(
+												'<div class="no-video-container">' +
+													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+													'<span class="no-video-text">No webcam available</span>' +
+												'</div>');
+										}
+									} else {
+										$('#videoleft .no-video-container').remove();
+										$('#myvideo').removeClass('hide').show();
 									}
 								},
 								onremotestream: function(stream) {
 									Janus.debug(" ::: Got a remote stream :::");
-									Janus.debug(JSON.stringify(stream));
+									Janus.debug(stream);
 									if($('#remotevideo').length === 0) {
 										$('#videoright').parent().find('h3').html(
 											'Send DTMF: <span id="dtmf" class="btn-group btn-group-xs"></span>');
@@ -367,33 +389,36 @@ $(document).ready(function() {
 												$('#dtmf').append('<button class="btn btn-info dtmf">*</button>');
 										}
 										$('.dtmf').click(function() {
-											if(adapter.browserDetails.browser === 'chrome') {
-												// Send DTMF tone (inband)
-												sipcall.dtmf({dtmf: { tones: $(this).text()}});
-											} else {
-												// Try sending the DTMF tone using SIP INFO
-												sipcall.send({message: {request: "dtmf_info", digit: $(this).text()}});
-											}
+											// Send DTMF tone (inband)
+											sipcall.dtmf({dtmf: { tones: $(this).text()}});
+											// Notice you can also send DTMF tones using SIP INFO
+											// 		sipcall.send({message: {request: "dtmf_info", digit: $(this).text()}});
+										});
+										// Show the peer and hide the spinner when we get a playing event
+										$("#remotevideo").bind("playing", function () {
+											$('#waitingvideo').remove();
+											if(this.videoWidth)
+												$('#remotevideo').removeClass('hide').show();
+											if(spinner !== null && spinner !== undefined)
+												spinner.stop();
+											spinner = null;
 										});
 									}
-									// Show the peer and hide the spinner when we get a playing event
-									$("#remotevideo").bind("playing", function () {
-										$('#waitingvideo').remove();
-										$('#remotevideo').removeClass('hide');
-										if(spinner !== null && spinner !== undefined)
-											spinner.stop();
-										spinner = null;
-									});
 									Janus.attachMediaStream($('#remotevideo').get(0), stream);
 									var videoTracks = stream.getVideoTracks();
-									if(videoTracks === null || videoTracks === undefined || videoTracks.length === 0 || videoTracks[0].muted) {
+									if(videoTracks === null || videoTracks === undefined || videoTracks.length === 0) {
 										// No remote video
 										$('#remotevideo').hide();
-										$('#videoright').append(
-											'<div class="no-video-container">' +
-												'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-												'<span class="no-video-text">No remote video available</span>' +
-											'</div>');
+										if($('#videoright .no-video-container').length === 0) {
+											$('#videoright').append(
+												'<div class="no-video-container">' +
+													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+													'<span class="no-video-text">No remote video available</span>' +
+												'</div>');
+										}
+									} else {
+										$('#videoright .no-video-container').remove();
+										$('#remotevideo').removeClass('hide').show();
 									}
 								},
 								oncleanup: function() {

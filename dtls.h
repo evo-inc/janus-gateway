@@ -4,7 +4,7 @@
  * \brief    DTLS/SRTP processing (headers)
  * \details  Implementation (based on OpenSSL and libsrtp) of the DTLS/SRTP
  * transport. The code takes care of the DTLS handshake between peers and
- * the gateway, and sets the proper SRTP and SRTCP context up accordingly.
+ * the server, and sets the proper SRTP and SRTCP context up accordingly.
  * A DTLS alert from a peer is notified to the plugin handling him/her
  * by means of the hangup_media callback.
  *
@@ -19,14 +19,17 @@
 #include <glib.h>
 
 #include "rtp.h"
+#include "rtpsrtp.h"
 #include "sctp.h"
+#include "refcount.h"
 #include "dtls-bio.h"
 
 /*! \brief DTLS stuff initialization
  * @param[in] server_pem Path to the certificate to use
  * @param[in] server_key Path to the key to use
+ * @param[in] password Password needed to use the key, if any
  * @returns 0 in case of success, a negative integer on errors */
-gint janus_dtls_srtp_init(const char* server_pem, const char* server_key);
+gint janus_dtls_srtp_init(const char *server_pem, const char *server_key, const char *password);
 /*! \brief Method to cleanup DTLS stuff before exiting */
 void janus_dtls_srtp_cleanup(void);
 /*! \brief Method to return a string representation (SHA-256) of the certificate fingerprint */
@@ -52,10 +55,12 @@ typedef enum janus_dtls_state {
 typedef struct janus_dtls_srtp {
 	/*! \brief Opaque pointer to the component this DTLS-SRTP context belongs to */
 	void *component;
-	/*! \brief DTLS role of the gateway for this stream: 1=client, 0=server */
+	/*! \brief DTLS role of the server for this stream: 1=client, 0=server */
 	janus_dtls_role dtls_role;
 	/*! \brief DTLS state of this component: -1=failed, 0=nothing, 1=trying, 2=connected */
 	janus_dtls_state dtls_state;
+	/*! \brief Monotonic time of when the DTLS handhake has started */
+	gint64 dtls_started;
 	/*! \brief Monotonic time of when the DTLS state has switched to connected */
 	gint64 dtls_connected;
 	/*! \brief SSL context used for DTLS for this component */
@@ -68,6 +73,8 @@ typedef struct janus_dtls_srtp {
 	BIO *filter_bio;
 	/*! \brief Whether SRTP has been correctly set up for this component or not */
 	gint srtp_valid;
+	/*! \brief The SRTP profile currently in use */
+	gint srtp_profile;
 	/*! \brief libsrtp context for incoming SRTP packets */
 	srtp_t srtp_in;
 	/*! \brief libsrtp context for outgoing SRTP packets */
@@ -76,8 +83,6 @@ typedef struct janus_dtls_srtp {
 	srtp_policy_t remote_policy;
 	/*! \brief libsrtp policy for outgoing SRTP packets */
 	srtp_policy_t local_policy;
-	/*! \brief Mutex to lock/unlock this libsrtp context */
-	janus_mutex srtp_mutex;
 	/*! \brief Whether this DTLS stack is now ready to be used for messages as well (e.g., SCTP encapsulation) */
 	int ready;
 	/*! \brief The number of retransmissions that have occurred for this DTLS instance so far */
@@ -86,6 +91,10 @@ typedef struct janus_dtls_srtp {
 	/*! \brief SCTP association, if DataChannels are involved */
 	janus_sctp_association *sctp;
 #endif
+	/*! \brief Atomic flag to check if this instance has been destroyed */
+	volatile gint destroyed;
+	/*! \brief Reference counter for this instance */
+	janus_refcount ref;
 } janus_dtls_srtp;
 
 
@@ -97,6 +106,13 @@ janus_dtls_srtp *janus_dtls_srtp_create(void *component, janus_dtls_role role);
 /*! \brief Start a DTLS handshake
  * @param[in] dtls The janus_dtls_srtp instance to start the handshake on */
 void janus_dtls_srtp_handshake(janus_dtls_srtp *dtls);
+/*! \brief Create an SCTP association, for data channels
+ * \note This is a separate method as, with renegotiations, it might happen
+ * that data channels are not created right away, right after the DTLS
+ * handshake has been completed, but only later, when DTLS is already up
+ * @param[in] dtls The janus_dtls_srtp instance to setup SCTP on
+ * @returns 0 in case of success, a negative integer otherwise */
+int janus_dtls_srtp_create_sctp(janus_dtls_srtp *dtls);
 /*! \brief Handle an incoming DTLS message
  * @param[in] dtls The janus_dtls_srtp instance to start the handshake on
  * @param[in] buf The DTLS message data
@@ -163,5 +179,9 @@ const gchar *janus_get_dtls_srtp_state(janus_dtls_state state);
  * @returns A string representation of the role */
 const gchar *janus_get_dtls_srtp_role(janus_dtls_role role);
 
+/*! \brief Helper method to get a string representation of an SRTP profile
+ * @param[in] profile The SRTP profile as exported by a DTLS-SRTP handshake
+ * @returns A string representation of the profile */
+const gchar *janus_get_dtls_srtp_profile(int profile);
 
 #endif
