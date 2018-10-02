@@ -1947,17 +1947,10 @@ static void janus_ice_cb_new_remote_candidate (NiceAgent *agent, NiceCandidate *
 #endif
 	}
 
-	/* Save for the summary, in case we need it */
-	component->remote_candidates = g_slist_append(component->remote_candidates, g_strdup(buffer));
-
-	/* Notify event handlers */
-	if(janus_events_is_enabled()) {
-		janus_session *session = (janus_session *)handle->session;
-		json_t *info = json_object();
-		json_object_set_new(info, "remote-candidate", json_string(buffer));
-		json_object_set_new(info, "stream_id", json_integer(stream_id));
-		json_object_set_new(info, "component_id", json_integer(component_id));
-		janus_events_notify_handlers(JANUS_EVENT_TYPE_WEBRTC, session->session_id, handle->handle_id, handle->opaque_id, info);
+	/* Now parse the candidate as if we received it from the Janus API */
+	int res = janus_sdp_parse_candidate(stream, buffer, 1);
+	if(res != 0) {
+		JANUS_LOG(LOG_ERR, "[%"SCNu64"] Failed to parse prflx candidate... (%d)\n", handle->handle_id, res);
 	}
 
 candidatedone:
@@ -3404,13 +3397,38 @@ static gboolean janus_ice_outgoing_rtcp_handle(gpointer user_data) {
 		/* Free and reset stats list */
 		g_slist_free(stream->transport_wide_received_seq_nums);
 		stream->transport_wide_received_seq_nums = NULL;
-		/* Get feedback packet count and increase it for next one */
-		guint8 feedback_packet_count = stream->transport_wide_cc_feedback_count++;
-		/* Create rtcp packet */
-		int len = janus_rtcp_transport_wide_cc_feedback(rtcpbuf, size,
-			stream->video_ssrc, stream->video_ssrc_peer[0], feedback_packet_count, packets);
-		/* Enqueue it, we'll send it later */
-		janus_ice_relay_rtcp_internal(handle, 1, rtcpbuf, len, FALSE);
+		/* Create and enqueue RTCP packets */
+		guint packets_len = 0;
+		while ((packets_len = g_queue_get_length(packets)) > 0) {
+			GQueue *packets_to_process;
+			/* If we have more than 400 packets to acknowledge, let's send more than one message */
+			if (packets_len > 400) {
+				/* Split the queue into two */
+				GList *new_head = g_queue_peek_nth_link(packets, 400);
+				GList *new_tail = new_head->prev;
+				new_head->prev = NULL;
+				new_tail->next = NULL;
+				packets_to_process = g_queue_new();
+				packets_to_process->head = packets->head;
+				packets_to_process->tail = new_tail;
+				packets_to_process->length = 400;
+				packets->head = new_head;
+				/* packets->tail is unchanged */
+				packets->length = packets_len - 400;
+			} else {
+				packets_to_process = packets;
+			}
+			/* Get feedback packet count and increase it for next one */
+			guint8 feedback_packet_count = stream->transport_wide_cc_feedback_count++;
+			/* Create RTCP packet */
+			int len = janus_rtcp_transport_wide_cc_feedback(rtcpbuf, size,
+				stream->video_ssrc, stream->video_ssrc_peer[0], feedback_packet_count, packets_to_process);
+			/* Enqueue it, we'll send it later */
+			janus_ice_relay_rtcp_internal(handle, 1, rtcpbuf, len, FALSE);
+			if (packets_to_process != packets) {
+				g_queue_free(packets_to_process);
+			}
+		}
 		/* Free mem */
 		g_queue_free(packets);
 	}

@@ -1226,7 +1226,7 @@ int janus_sip_init(janus_callbacks *callback, const char *config_path) {
 			struct ifaddrs *ifas = NULL;
 			janus_network_address iface;
 			janus_network_address_string_buffer ibuf;
-			if(getifaddrs(&ifas) || ifas == NULL) {
+			if(getifaddrs(&ifas) == -1) {
 				JANUS_LOG(LOG_ERR, "Unable to acquire list of network devices/interfaces; some configurations may not work as expected...\n");
 			} else {
 				if(janus_network_lookup_interface(ifas, item->value, &iface) != 0) {
@@ -1238,6 +1238,7 @@ int janus_sip_init(janus_callbacks *callback, const char *config_path) {
 						local_ip = g_strdup(janus_network_address_string_from_buffer(&ibuf));
 					}
 				}
+				freeifaddrs(ifas);
 			}
 		}
 
@@ -1855,9 +1856,10 @@ static void janus_sip_hangup_media_internal(janus_plugin_session *handle) {
 	session->media.simulcast_ssrc = 0;
 	if(!(session->status == janus_sip_call_status_inviting ||
 		 session->status == janus_sip_call_status_invited ||
-		 session->status == janus_sip_call_status_incall))
+		 session->status == janus_sip_call_status_incall)) {
 		g_atomic_int_set(&session->hangingup, 0);
 		return;
+	}
 	/* Do cleanup if media thread has not been created */
 	if(!session->media.ready) {
 		janus_sip_media_cleanup(session);
@@ -3150,6 +3152,7 @@ static void *janus_sip_handler(void *data) {
 			const char *msg_content = json_string_value(json_object_get(root, "content"));
 			nua_message(session->stack->s_nh_i,
 				NUTAG_URL(session->callee),
+				SIPTAG_CONTENT_TYPE_STR("text/plain"),
 				SIPTAG_PAYLOAD_STR(msg_content),
 				TAG_END());
 			/* Notify the operation */
@@ -4491,12 +4494,7 @@ static void *janus_sip_relay_thread(void *data) {
 				JANUS_LOG(LOG_ERR, "[SIP-%s]   -- %d (%s)\n", session->account.username, error, strerror(error));
 				goon = FALSE;	/* Can we assume it's pretty much over, after a POLLERR? */
 				/* FIXME Simulate a "hangup" coming from the browser */
-				janus_sip_message *msg = g_malloc(sizeof(janus_sip_message));
-				msg->handle = session->handle;
-				msg->message = json_pack("{ss}", "request", "hangup");
-				msg->transaction = NULL;
-				msg->jsep = NULL;
-				g_async_queue_push(messages, msg);
+				janus_sip_hangup_media(session->handle);
 				break;
 			} else if(fds[i].revents & POLLIN) {
 				if(pipe_fd != -1 && fds[i].fd == pipe_fd) {

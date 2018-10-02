@@ -3092,7 +3092,7 @@ json_t *janus_plugin_handle_sdp(janus_plugin_session *plugin_session, janus_plug
 			/* We set the flag to wait for an answer before handling trickle candidates */
 			janus_flags_set(&ice_handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_PROCESSING_OFFER);
 		} else {
-			JANUS_LOG(LOG_VERB, "[%"SCNu64"] Done! Ready to setup remote candidates and send connectivity checks...\n", ice_handle->handle_id);
+			JANUS_LOG(LOG_VERB, "[%"SCNu64"] Sending answer, ready to setup remote candidates and send connectivity checks...\n", ice_handle->handle_id);
 			janus_request_ice_handle_answer(ice_handle, audio, video, data, NULL);
 		}
 	}
@@ -3659,7 +3659,7 @@ gint main(int argc, char *argv[])
 		struct ifaddrs *ifas = NULL;
 		janus_network_address iface;
 		janus_network_address_string_buffer ibuf;
-		if(getifaddrs(&ifas) || ifas == NULL) {
+		if(getifaddrs(&ifas) == -1) {
 			JANUS_LOG(LOG_ERR, "Unable to acquire list of network devices/interfaces; some configurations may not work as expected...\n");
 		} else {
 			if(janus_network_lookup_interface(ifas, item->value, &iface) != 0) {
@@ -3671,6 +3671,7 @@ gint main(int argc, char *argv[])
 					local_ip = g_strdup(janus_network_address_string_from_buffer(&ibuf));
 				}
 			}
+			freeifaddrs(ifas);
 		}
 	}
 	if(local_ip == NULL) {
@@ -3957,13 +3958,17 @@ gint main(int argc, char *argv[])
 	SSL_load_error_strings();
 	OpenSSL_add_all_algorithms();
 	/* ... and DTLS-SRTP in particular */
-	if(janus_dtls_srtp_init(server_pem, server_key, password) < 0) {
+	guint dtls_timeout = 1000;
+	item = janus_config_get_item_drilldown(config, "media", "dtls_timeout");
+	if(item && item->value)
+		dtls_timeout = atoi(item->value);
+	if(janus_dtls_srtp_init(server_pem, server_key, password, dtls_timeout) < 0) {
 		exit(1);
 	}
 	/* Check if there's any custom value for the starting MTU to use in the BIO filter */
 	item = janus_config_get_item_drilldown(config, "media", "dtls_mtu");
 	if(item && item->value)
-		janus_dtls_bio_filter_set_mtu(atoi(item->value));
+		janus_dtls_bio_agent_set_mtu(atoi(item->value));
 
 #ifdef HAVE_SCTP
 	/* Initialize SCTP for DataChannels */

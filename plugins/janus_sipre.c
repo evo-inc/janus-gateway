@@ -983,7 +983,7 @@ int janus_sipre_init(janus_callbacks *callback, const char *config_path) {
 			struct ifaddrs *ifas = NULL;
 			janus_network_address iface;
 			janus_network_address_string_buffer ibuf;
-			if(getifaddrs(&ifas) || ifas == NULL) {
+			if(getifaddrs(&ifas) == -1) {
 				JANUS_LOG(LOG_ERR, "Unable to acquire list of network devices/interfaces; some configurations may not work as expected...\n");
 			} else {
 				if(janus_network_lookup_interface(ifas, item->value, &iface) != 0) {
@@ -995,6 +995,7 @@ int janus_sipre_init(janus_callbacks *callback, const char *config_path) {
 						local_ip = g_strdup(janus_network_address_string_from_buffer(&ibuf));
 					}
 				}
+				freeifaddrs(ifas);
 			}
 		}
 
@@ -1562,9 +1563,10 @@ static void janus_sipre_hangup_media_internal(janus_plugin_session *handle) {
 		return;
 	if(!(session->status == janus_sipre_call_status_inviting ||
 		 session->status == janus_sipre_call_status_invited ||
-		 session->status == janus_sipre_call_status_incall))
+		 session->status == janus_sipre_call_status_incall)) {
 		g_atomic_int_set(&session->hangingup, 0);
 		return;
+	}
 	session->media.ready = FALSE;
 	session->media.on_hold = FALSE;
 	session->status = janus_sipre_call_status_closing;
@@ -3329,12 +3331,7 @@ static void *janus_sipre_relay_thread(void *data) {
 				/* Can we assume it's pretty much over, after a POLLERR? */
 				goon = FALSE;
 				/* FIXME Simulate a "hangup" coming from the browser */
-				janus_sipre_message *msg = g_malloc(sizeof(janus_sipre_message));
-				msg->handle = session->handle;
-				msg->message = json_pack("{ss}", "request", "hangup");
-				msg->transaction = NULL;
-				msg->jsep = NULL;
-				g_async_queue_push(messages, msg);
+				janus_sipre_hangup_media(session->handle);
 				break;
 			} else if(fds[i].revents & POLLIN) {
 				if(pipe_fd != -1 && fds[i].fd == pipe_fd) {
