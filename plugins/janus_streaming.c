@@ -6238,6 +6238,7 @@ static void *janus_streaming_relay_thread(void *data) {
 							janus_mutex_unlock(&source->keyframe.mutex);
 						} else if (janus_streaming_is_sei(mountpoint->codecs.video_codec, buffer, bytes)) {
 							if (source->sei) {
+								g_free(source->sei->data);
 								g_free(source->sei);
 							}
 							janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
@@ -6255,6 +6256,7 @@ static void *janus_streaming_relay_thread(void *data) {
 							JANUS_LOG(LOG_HUGE, "[%s] Saved SEI ts=%"SCNu32"\n", name, pkt->timestamp);
 						}  else if (janus_streaming_is_pps(mountpoint->codecs.video_codec, buffer, bytes)) {
 							if (source->pps) {
+								g_free(source->pps->data);
 								g_free(source->pps);
 							}
 							janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
@@ -6272,6 +6274,7 @@ static void *janus_streaming_relay_thread(void *data) {
 							JANUS_LOG(LOG_HUGE, "[%s] Saved PPS ts=%"SCNu32"\n", name, pkt->timestamp);
 						}  else if (janus_streaming_is_sps(mountpoint->codecs.video_codec, buffer, bytes)) {
 							if (source->sps) {
+								g_free(source->sps->data);
 								g_free(source->sps);
 							}
 							janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
