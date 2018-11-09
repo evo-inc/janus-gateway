@@ -11,6 +11,7 @@ Fix conflicts
 
 To see the original change set:
 `$ git diff 90fa6b6 71df9ee`
+Also incorporate the change from 390e8e67.
 
 Changes we have dropped as of 20 Sep 2018:
  - sdeslen in `ice.c`, upstream fixed this
@@ -22,4 +23,4 @@ Changes we keep as of 20 Sep 2018:
  - add `set_tokens` in `janus.c`
  - add SEI/SPS/PPS, `last_received_rtcp`, `janus_streaming_stop`, `janus_streaming_send_event`, stopping on timeout in `janus_streaming_relay_rtp_packet`, `janus_streaming_is_nal_type` in `plugins/janus_streaming.c`
  - error logs to libmicrohttpd in `transports/janus_http.c`
- 
+ - `g_free(source->xxx->data)` in plugins/janus_streaming.c
