@@ -28,12 +28,13 @@
 
 
 /* Pre-parse SDP: is this SDP valid? how many audio/video lines? any features to take into account? */
-janus_sdp *janus_sdp_preparse(const char *jsep_sdp, char *error_str, size_t errlen,
+janus_sdp *janus_sdp_preparse(void *ice_handle, const char *jsep_sdp, char *error_str, size_t errlen,
 		int *audio, int *video, int *data) {
-	if(!jsep_sdp || !audio || !video || !data) {
+	if(!ice_handle || !jsep_sdp || !audio || !video || !data) {
 		JANUS_LOG(LOG_ERR, "  Can't preparse, invalid arguments\n");
 		return NULL;
 	}
+	janus_ice_handle *handle = (janus_ice_handle *)ice_handle;
 	janus_sdp *parsed_sdp = janus_sdp_parse(jsep_sdp, error_str, errlen);
 	if(!parsed_sdp) {
 		JANUS_LOG(LOG_ERR, "  Error parsing SDP? %s\n", error_str ? error_str : "(unknown reason)");
@@ -48,6 +49,30 @@ janus_sdp *janus_sdp_preparse(const char *jsep_sdp, char *error_str, size_t errl
 			*audio = *audio + 1;
 		} else if(m->type == JANUS_SDP_VIDEO && m->port > 0) {
 			*video = *video + 1;
+		}
+		/* Preparse the mid as well */
+		GList *tempA = m->attributes;
+		while(tempA) {
+			janus_sdp_attribute *a = (janus_sdp_attribute *)tempA->data;
+			if(a->name) {
+				if(!strcasecmp(a->name, "mid")) {
+					/* Found mid attribute */
+					if(m->type == JANUS_SDP_AUDIO && m->port > 0) {
+						JANUS_LOG(LOG_VERB, "[%"SCNu64"] Audio mid: %s\n", handle->handle_id, a->value);
+						if(handle->audio_mid == NULL)
+							handle->audio_mid = g_strdup(a->value);
+						if(handle->stream_mid == NULL)
+							handle->stream_mid = handle->audio_mid;
+					} else if(m->type == JANUS_SDP_VIDEO && m->port > 0) {
+						JANUS_LOG(LOG_VERB, "[%"SCNu64"] Video mid: %s\n", handle->handle_id, a->value);
+						if(handle->video_mid == NULL)
+							handle->video_mid = g_strdup(a->value);
+						if(handle->stream_mid == NULL)
+							handle->stream_mid = handle->video_mid;
+					}
+				}
+			}
+			tempA = tempA->next;
 		}
 		temp = temp->next;
 	}
@@ -1087,25 +1112,25 @@ char *janus_sdp_merge(void *ice_handle, janus_sdp *anon, gboolean offer) {
 	GList *temp = anon->m_lines;
 	while(temp) {
 		janus_sdp_mline *m = (janus_sdp_mline *)temp->data;
-		if(m->type == JANUS_SDP_AUDIO && m->port > 0) {
+		if(m->type == JANUS_SDP_AUDIO) {
 			audio++;
 			if(audio == 1) {
 				g_snprintf(buffer_part, sizeof(buffer_part),
 					" %s", handle->audio_mid ? handle->audio_mid : "audio");
 				g_strlcat(buffer, buffer_part, JANUS_BUFSIZE);
 			}
-		} else if(m->type == JANUS_SDP_VIDEO && m->port > 0) {
+		} else if(m->type == JANUS_SDP_VIDEO) {
 			video++;
-			if(video) {
+			if(video == 1) {
 				g_snprintf(buffer_part, sizeof(buffer_part),
 					" %s", handle->video_mid ? handle->video_mid : "video");
 				g_strlcat(buffer, buffer_part, JANUS_BUFSIZE);
 			}
 #ifdef HAVE_SCTP
-		} else if(m->type == JANUS_SDP_APPLICATION && m->port > 0) {
+		} else if(m->type == JANUS_SDP_APPLICATION) {
 			if(m->proto && (!strcasecmp(m->proto, "DTLS/SCTP") || !strcasecmp(m->proto, "UDP/DTLS/SCTP")))
 				data++;
-			if(data) {
+			if(data == 1) {
 				g_snprintf(buffer_part, sizeof(buffer_part),
 					" %s", handle->data_mid ? handle->data_mid : "data");
 				g_strlcat(buffer, buffer_part, JANUS_BUFSIZE);
@@ -1262,14 +1287,14 @@ char *janus_sdp_merge(void *ice_handle, janus_sdp *anon, gboolean offer) {
 			continue;
 		}
 		/* a=mid:(audio|video|data) */
-		if(m->type == JANUS_SDP_AUDIO) {
+		if(m->type == JANUS_SDP_AUDIO && audio == 1) {
 			a = janus_sdp_attribute_create("mid", "%s", handle->audio_mid);
 			m->attributes = g_list_insert_before(m->attributes, first, a);
-		} else if(m->type == JANUS_SDP_VIDEO) {
+		} else if(m->type == JANUS_SDP_VIDEO && video == 1) {
 			a = janus_sdp_attribute_create("mid", "%s", handle->video_mid);
 			m->attributes = g_list_insert_before(m->attributes, first, a);
 #ifdef HAVE_SCTP
-		} else if(m->type == JANUS_SDP_APPLICATION) {
+		} else if(m->type == JANUS_SDP_APPLICATION && data == 1) {
 			if(!strcasecmp(m->proto, "UDP/DTLS/SCTP"))
 				janus_flags_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_NEW_DATACHAN_SDP);
 			if(!janus_flags_is_set(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_NEW_DATACHAN_SDP)) {
