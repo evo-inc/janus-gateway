@@ -87,6 +87,12 @@ AC_ARG_ENABLE([turn-rest-api],
                               [Disable TURN REST API client (via libcurl)])],
               [],
               [enable_turn_rest_api=maybe])
+			  
+AC_ARG_ENABLE([talkback],
+              [AS_HELP_STRING([--disable-talkback],
+                              [Disable Talkback in streaming plugin])],
+              [],
+              [enable_talkback=maybe])
 
 AC_ARG_ENABLE([all-plugins],
               [AS_HELP_STRING([--disable-all-plugins],
@@ -385,6 +391,23 @@ PKG_CHECK_MODULES([LIBCURL],
                   ])
 AM_CONDITIONAL([ENABLE_TURN_REST_API], [test "x$enable_turn_rest_api" = "xyes"])
 AM_CONDITIONAL([ENABLE_SAMPLEEVH], [test "x$enable_sample_event_handler" = "xyes"])
+
+PKG_CHECK_MODULES([LIBPULSE],
+                  [libpulse-simple],
+                  [
+                    AS_IF(
+                      [test "x$enable_talkback" != "xno"],
+                      [
+                        AC_DEFINE(HAVE_LIBPULSE)
+                        JANUS_MANUAL_LIBS+=" -lpulse-simple -lpulse"
+                        enable_talkback=yes
+                      ])
+                  ],
+                  [
+                    AS_IF([test "x$enable_talkback" = "xyes"],
+                          [AC_MSG_ERROR([libpulse not found. See README.md for installation instructions or use --disable-talkback])])
+                  ])
+AM_CONDITIONAL([ENABLE_PLUGIN_STREAMING_TALKBACK], [test "x$enable_talkback" = "xyes"])
 
 AC_CHECK_PROG([DOXYGEN],
               [doxygen],
@@ -920,6 +943,9 @@ AM_COND_IF([ENABLE_PLUGIN_ECHOTEST],
 AM_COND_IF([ENABLE_PLUGIN_STREAMING],
 	[echo "    Streaming:             yes"],
 	[echo "    Streaming:             no"])
+AM_COND_IF([ENABLE_PLUGIN_STREAMING_TALKBACK],
+	[echo "      Talkback:            yes"],
+	[echo "      Talkback:            no"])
 AM_COND_IF([ENABLE_PLUGIN_VIDEOCALL],
 	[echo "    Video Call:            yes"],
 	[echo "    Video Call:            no"])

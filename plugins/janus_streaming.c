@@ -681,6 +681,13 @@ rtspiface = network interface IP address or device name to listen on when receiv
 #include "../utils.h"
 #include "../ip-utils.h"
 
+#ifdef HAVE_LIBPULSE
+#include <pulse/simple.h>
+#include <pulse/error.h>
+#include <spawn.h>
+#include <wait.h>
+#endif
+
 
 /* Plugin information */
 #define JANUS_STREAMING_VERSION			8
@@ -824,7 +831,9 @@ static struct janus_json_parameter rtsp_parameters[] = {
 	{"data", JANUS_JSON_BOOL, 0},
 	{"rtspiface", JSON_STRING, 0},
 	{"rtsp_failcheck", JANUS_JSON_BOOL, 0},
-	{"talkback_port", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE}
+	#ifdef HAVE_LIBPULSE
+	{"talkback", JANUS_JSON_BOOL, 0}
+#endif
 };
 #endif
 static struct janus_json_parameter rtp_audio_parameters[] = {
@@ -1079,7 +1088,9 @@ typedef struct janus_streaming_mountpoint {
 	volatile gint destroyed;
 	janus_mutex mutex;
 	janus_refcount ref;
-  uint16_t talkback_port;
+#ifdef HAVE_LIBPULSE
+    gboolean talkback;
+#endif
 } janus_streaming_mountpoint;
 GHashTable *mountpoints;
 janus_mutex mountpoints_mutex;
@@ -1154,15 +1165,17 @@ typedef struct janus_streaming_session {
 	volatile gint hangingup;
 	volatile gint destroyed;
 	janus_refcount ref;
-	int talkback_socket;
-	uint16_t talkback_port;
-	guint16 talkback_sequence_last;
+#ifdef HAVE_LIBPULSE
+	gboolean talkback;
+	pa_simple* talkback_pulse;
+#endif
 } janus_streaming_session;
 static GHashTable *sessions;
 static janus_mutex sessions_mutex = JANUS_MUTEX_INITIALIZER;
-
+#ifdef HAVE_LIBPULSE
 static void janus_streaming_start_talkback(janus_streaming_session *session);
 static void janus_streaming_stop_talkback(janus_streaming_session *session);
+#endif
 
 static void janus_streaming_session_destroy(janus_streaming_session *session) {
 	if(session && g_atomic_int_compare_and_exchange(&session->destroyed, 0, 1))
@@ -1844,13 +1857,10 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 					mp->secret = g_strdup(secret->value);
 				if(pin && pin->value)
 					mp->pin = g_strdup(pin->value);
-				
-				janus_config_item *talkback_port = janus_config_get(config, cat, janus_config_type_item, "talkback_port");
-	      if (talkback_port && talkback_port->value) {
-	      	mp->talkback_port = atoi(talkback_port->value);
-	      } else {
-	      	mp->talkback_port = 0;
-	      }
+#ifdef HAVE_LIBPULSE
+				janus_config_item *talkback = janus_config_get(config, cat, janus_config_type_item, "talkback");
+				mp->talkback = talkback && talkback->value && janus_is_true(talkback->value);
+#endif
 #endif
 			} else {
 				JANUS_LOG(LOG_WARN, "Ignoring unknown stream type '%s' (%s)...\n", type->value, cat->name);
@@ -3669,12 +3679,10 @@ void janus_streaming_setup_media(janus_plugin_session *handle) {
 			janus_mutex_unlock(&source->buffermsg_mutex);
 		}
 	}
-	session->talkback_socket = -1;
-	if (mountpoint->talkback_port > 0) {
-		session->talkback_port =  mountpoint->talkback_port;
-	} else {
-		session->talkback_port = 0;
-	}
+#ifdef HAVE_LIBPULSE
+	session->talkback_pulse = NULL;
+	session->talkback = mountpoint->talkback;
+#endif
 	session->started = TRUE;
 	/* Prepare JSON event */
 	json_t *event = json_object();
@@ -3692,61 +3700,7 @@ void janus_streaming_incoming_rtp(janus_plugin_session *handle, int video, char 
 	if(handle == NULL || g_atomic_int_get(&handle->stopped) || g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
 		return;
 	/* FIXME We don't care about what the browser sends us, we're sendonly */
-	janus_streaming_session *session = janus_streaming_lookup_session(handle);
-	if (!video) {
-		if (session->talkback_socket >= 0) {
-			// JANUS_LOG(LOG_INFO, "RTP Incoming %d bytes\n", len);
-			janus_rtp_header *header = (janus_rtp_header *)buf;
-			guint16 seqn_current = ntohs(header->seq_number);
-		
-			guint16 seqnr_last = session->talkback_sequence_last;
-			guint16 missed = seqn_current - seqnr_last - (guint16)1;
-			if (!seqnr_last) {
-				JANUS_LOG(LOG_WARN, "First Talkback Packet %d\n", seqn_current);
-				missed = 0;
-			}
-			
-			if (missed > 32000) { // reordered packets
-				JANUS_LOG(LOG_WARN, "Talkback Packet %d came after %d\n", seqn_current, session->talkback_sequence_last);
-			} else {
-			
-				if (missed) {
-					JANUS_LOG(LOG_WARN, "Missed %d audio packets before sequence number %d\n", missed, seqn_current);
-				}
-				
-				session->talkback_sequence_last = seqn_current;
-				uint32_t dataLength = 0;
-				ssize_t sent;
-				int m;
-				for(m = 0; m < missed; m++) {
-					sent = send(session->talkback_socket, &dataLength, sizeof(dataLength), 0);
-					if (sent == -1) {
-						JANUS_LOG(LOG_ERR, "Failed to send empty talkback packet size: %d (%s)\n", errno, strerror(errno));
-					}
-				}
-				char* payload = janus_rtp_payload(buf, len, &dataLength);
-				if (payload) {
-					sent = send(session->talkback_socket, &dataLength, sizeof(dataLength), 0);
-					if (sent == -1) {
-						JANUS_LOG(LOG_ERR, "Failed to forward talkback packet size: %d (%s)\n", errno, strerror(errno));
-						janus_streaming_stop_talkback(session);
-						janus_streaming_start_talkback(session);
-						return;
-					}
-					sent = send(session->talkback_socket, payload, dataLength, 0);
-					if (sent == -1) {
-						JANUS_LOG(LOG_ERR, "Failed to forward talkback packet:%d (%s)\n", errno, strerror(errno));
-						janus_streaming_stop_talkback(session);
-						janus_streaming_start_talkback(session);
-						return;
-					}
-				} else {
-					JANUS_LOG(LOG_WARN, "Failed to extract packet payload\n");
-				}
-			}
-			
-		}
-	}
+	janus_streaming_session *session = janus_streaming_lookup_session(handle);	
 }
 
 void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char *buf, int len) {
@@ -3785,52 +3739,87 @@ void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char
 
 	/* FIXME Maybe we should care about RTCP, but not now */
 }
+#ifdef HAVE_LIBPULSE 
+static int exec(const char* const argv[]) {
+  pid_t child_pid;
+  int s, status = 0;
+
+  const char* const envp[] = {NULL};
+  JANUS_LOG(LOG_INFO, "Runninng: %s\n", argv[0]);
+  s = posix_spawnp(&child_pid, argv[0], NULL, NULL, (char* const*)argv, (char* const*)envp);
+  if (s != 0) {
+      JANUS_LOG(LOG_ERR, "posix_spawn: %d\n", s, strerror(s));
+    }
+
+
+  JANUS_LOG(LOG_INFO, "PID of child: %ld\n", (long) child_pid);
+
+  do {
+      s = waitpid(child_pid, &status, WUNTRACED | WCONTINUED);
+      if (s == -1) {
+          JANUS_LOG(LOG_ERR, "waitpid: %d\n", errno);
+	  }
+
+      if (WIFEXITED(status)) {
+          int s = WEXITSTATUS(status);
+          if (s) {
+            JANUS_LOG(LOG_ERR, "Child status: exited, status=%d\n", s);
+          }
+          return s;
+      } else if (WIFSIGNALED(status)) {
+          JANUS_LOG(LOG_ERR, "Child status: killed by signal %d\n", WTERMSIG(status));
+      } else if (WIFSTOPPED(status)) {
+          JANUS_LOG(LOG_ERR, "Child status: stopped by signal %d\n", WSTOPSIG(status));
+      } else if (WIFCONTINUED(status)) {
+          JANUS_LOG(LOG_WARN, "Child status: continued\n");
+      }
+  } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+  return -1;
+}
+
+static void send_message(const char* message) {
+	const char* const args[] = {"/usr/bin/evo-hub-send", message, NULL};
+	int result = exec(args);
+	JANUS_LOG(LOG_INFO, "Sent message %s: %d\n", message, result);
+}
 
 static void janus_streaming_start_talkback(janus_streaming_session *session) {
-	if (session->talkback_port > 0 && session->talkback_socket == -1) {
-		int ptt_socket = socket(AF_INET, SOCK_STREAM, 0);
-	  if (ptt_socket < 0) {
-			JANUS_LOG(LOG_ERR, "Talkback socket creation failed: %d (%s)\n", errno, strerror(errno));
-		} else {
-			struct sockaddr_in addr;
-			memset(&addr, 0, sizeof(addr));
-			addr.sin_family = AF_INET;
-			addr.sin_port = htons(session->talkback_port);
-			addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-			if (connect(ptt_socket, (struct sockaddr *)&addr, sizeof(addr))) {
-					JANUS_LOG(LOG_ERR, "Talkback Connect failed: %d (%s)\n", errno, strerror(errno));
-					return;
-			}
-			time_t rawtime;
-			struct tm * ptm;
-			time(&rawtime);
-			ptm = gmtime(&rawtime);
-			char timestamp[21];
-			strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%ML%SZ", ptm);
-			char format_request[255];
-			//TODO get channel/samplerate from SDP
-			int format_request_length = snprintf(format_request, sizeof(format_request), "{\"audio_stream\":{\"codec\":\"ulaw\",\"parameters\":{\"channels\":\"1\",\"samplespersec\":\"8000\",\"bits\":\"8\"},\"timestamp\":\"%s\"}}", timestamp);
-			// int format_request_length = snprintf(format_request, sizeof(format_request), "{\"audio_stream\":{\"codec\":\"raw\",\"parameters\":{\"channels\":\"1\",\"samplespersec\":\"48000\",\"bits\":\"16\"},\"timestamp\":\"%s\"}}", timestamp);
-			JANUS_LOG(LOG_INFO, "Sending PTT format description %s: %d bytes", format_request, format_request_length);
-			if (send(ptt_socket, format_request, format_request_length, 0) == format_request_length) {
-				session->talkback_sequence_last = 0;
-				session->talkback_socket = ptt_socket;
-			} else {
-				JANUS_LOG(LOG_ERR, "Failed to send audio format: %d (%s)\n", errno, strerror(errno));
-				return;
-			}
-		}
+	if (session->talkback && session->talkback_pulse == NULL) {
+	    const pa_sample_spec ss = {
+	       .format = PA_SAMPLE_ULAW,
+	       .rate = 8000,
+	       .channels = 1
+	    };
+
+	    int error;
+        pa_simple* s = pa_simple_new(NULL, "janus_streaming", PA_STREAM_PLAYBACK, NULL, "talkback", &ss, NULL, NULL, &error);
+
+	    if (!s) {
+	       JANUS_LOG(LOG_ERR, "pa_simple_new() failed: %s\n", pa_strerror(error));
+	       return;
+	    }
+	    pa_simple_flush(s, &error); //clear any lingering samples in Pulse's buffers
+		session->talkback_pulse = s;
+		
+		send_message("{\"ptt_state\": {\"state\": \"on\"}}");
+		send_message("{\"speaker_status\": {\"active\": true}}");
+		
+		JANUS_LOG(LOG_INFO, "Started Talkback\n");
+	} else {
+		JANUS_LOG(LOG_WARN, "NOT Started Talkback\n");
 	}
 }
 
 static void janus_streaming_stop_talkback(janus_streaming_session *session) {
-	if (session->talkback_socket >= 0) {
-		close(session->talkback_socket);
-		session->talkback_socket = -1;
-		session->talkback_sequence_last = 0;
+	if (session->talkback_pulse != NULL) {
+		pa_simple_free(session->talkback_pulse);
+		session->talkback_pulse = NULL;
+		send_message("{\"ptt_state\": {\"state\": \"off\"}}");
+		send_message("{\"speaker_status\": {\"active\": false}}");
 	}
 }
-static uint8_t zeroes[4800] = {};
+
+#endif
 
 void janus_streaming_incoming_data(janus_plugin_session *handle, char *buf, int len) {
 	if(handle == NULL || g_atomic_int_get(&handle->stopped) || g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
@@ -3840,6 +3829,7 @@ void janus_streaming_incoming_data(janus_plugin_session *handle, char *buf, int 
 		JANUS_LOG(LOG_ERR, "No session associated with this handle...\n");
 		return;
 	}
+#ifdef HAVE_LIBPULSE	
 	if (len > 3) {
 		char cmd[3];
 		memcpy(cmd, buf, 3);
@@ -3857,31 +3847,16 @@ void janus_streaming_incoming_data(janus_plugin_session *handle, char *buf, int 
 			}
 			g_free(text);
 		} else if (cmd[0] == 'T' && cmd[1] == 'K' && cmd[2] == 'B') {
-			if (session->talkback_socket >= 0) {
-				uint32_t dataLength = dLen;
-				uint32_t dataSent = 0;
-				/*ssize_t sent = send(session->talkback_socket, &dataLength, sizeof(dataLength), 0);
-				if (sent == -1) {
-					JANUS_LOG(LOG_ERR, "Failed to forward talkback packet size: %d (%s)\n", errno, strerror(errno));
+			if (session->talkback_pulse != NULL) {
+				int error;
+			    if (pa_simple_write(session->talkback_pulse, data, dLen, &error) < 0) {
+			        JANUS_LOG(LOG_ERR, "pa_simple_write() failed: %s\n", pa_strerror(error));
 					janus_streaming_stop_talkback(session);
 					janus_streaming_start_talkback(session);
-					return;
-				}*/
-				while (dataLength > 0) {
-					//ssize_t sent = send(session->talkback_socket, data + dataSent, dataLength, 0);
-					ssize_t sent = send(session->talkback_socket, zeroes, dataLength, 0);
-					if (sent == -1) {
-						JANUS_LOG(LOG_ERR, "Failed to forward talkback packet:%d (%s)\n", errno, strerror(errno));
-						janus_streaming_stop_talkback(session);
-						janus_streaming_start_talkback(session);
-						return;
-					} /*else {
-						JANUS_LOG(LOG_VERB, "Forwarded talkback packet of %d bytes\n", sent);
-					}*/
-					sent /= 12;
-					dataLength -= sent;
-					dataSent += sent;
-				}
+			        return;
+			    } /*else {
+			    	JANUS_LOG(LOG_VERB, "pa_simple_written: %d bytes\n", dLen);
+			    }*/
 			}
 		} else {
 			JANUS_LOG(LOG_WARN, "Got an unknown DataChannel message type (%zu bytes): %02X%02X%02X\n", len, cmd[0], cmd[1], cmd[2]);
@@ -3889,6 +3864,7 @@ void janus_streaming_incoming_data(janus_plugin_session *handle, char *buf, int 
 	} else {
 			JANUS_LOG(LOG_WARN, "Got a short DataChannel message (%zu bytes)\n", len);
 	}
+#endif
 }
 
 void janus_streaming_hangup_media(janus_plugin_session *handle) {
@@ -3923,10 +3899,9 @@ static void janus_streaming_hangup_media_internal(janus_plugin_session *handle) 
 	session->stopping = TRUE;
 	session->started = FALSE;
 	session->paused = FALSE;
-	if (session->talkback_socket >= 0) {
-		close(session->talkback_socket);
-		session->talkback_socket = -1;
-	}
+#ifdef HAVE_LIBPULSE
+	janus_streaming_stop_talkback(session);
+#endif
 	janus_streaming_mountpoint *mp = session->mountpoint;
 	if(mp) {
 		janus_mutex_lock(&mp->mutex);
@@ -4217,22 +4192,10 @@ done:
 						mp->codecs.audio_pt, mp->codecs.audio_fmtp);
 					g_strlcat(sdptemp, buffer, 2048);
 				}
-				if(!mp->talkback_port) {
+				//if(!mp->talkback) {
 					g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
-				}
-			}/*
-			if(mp->talkback_port) {
-				g_snprintf(buffer, 512,
-					"m=audio 1 RTP/SAVPF %d\r\n"
-					"c=IN IP4 1.1.1.1\r\n",
-					0);
-				g_strlcat(sdptemp, buffer, 2048);
-				g_snprintf(buffer, 512,
-					"a=rtpmap:%d %s\r\n",
-					0, "PCMU/8000");
-				g_strlcat(sdptemp, buffer, 2048);
-				g_strlcat(sdptemp, "a=recvonly\r\n", 2048);
-			}*/
+				//}
+			}
 			
 			if(mp->codecs.video_pt >= 0 && session->video) {
 				/* Add video line */
