@@ -54,9 +54,9 @@ stream-name: {
 	[settings]
 }
 \endverbatim
- * 
+ *
  * with the allowed settings listed below:
- * 
+ *
  * \verbatim
 type = rtp|live|ondemand|rtsp
        rtp = stream originated by an external tool (e.g., gstreamer or
@@ -69,15 +69,15 @@ type = rtp|live|ondemand|rtsp
               available if libcurl support was compiled)
 id = <unique numeric ID>
 description = This is my awesome stream
-is_private = yes|no (private streams don't appear when you do a 'list' request)
+is_private = true|false (private streams don't appear when you do a 'list' request)
 filename = path to the local file to stream (only for live/ondemand)
 secret = <optional password needed for manipulating (e.g., destroying
 		or enabling/disabling) the stream>
 pin = <optional password needed for watching the stream>
-audio = yes|no (do/don't stream audio)
-video = yes|no (do/don't stream video)
+audio = true|false (do/don't stream audio)
+video = true|false (do/don't stream video)
    The following options are only valid for the 'rtp' type:
-data = yes|no (do/don't stream text via datachannels)
+data = true|false (do/don't stream text via datachannels)
 audioport = local port for receiving audio frames
 audiortcpport = local port for receiving and sending audio RTCP feedback
 audiomcast = multicast group for receiving audio frames, if any
@@ -85,7 +85,7 @@ audioiface = network interface or IP address to bind to, if any (binds to all ot
 audiopt = <audio RTP payload type> (e.g., 111)
 audiortpmap = RTP map of the audio codec (e.g., opus/48000/2)
 audiofmtp = Codec specific parameters, if any
-audioskew = yes|no (whether the plugin should perform skew
+audioskew = true|false (whether the plugin should perform skew
 	analisys and compensation on incoming audio RTP stream, EXPERIMENTAL)
 videoport = local port for receiving video frames (only for rtp)
 videortcpport = local port for receiving and sending video RTCP feedback
@@ -94,20 +94,20 @@ videoiface = network interface or IP address to bind to, if any (binds to all ot
 videopt = <video RTP payload type> (e.g., 100)
 videortpmap = RTP map of the video codec (e.g., VP8/90000)
 videofmtp = Codec specific parameters, if any
-videobufferkf = yes|no (whether the plugin should store the latest
+videobufferkf = true|false (whether the plugin should store the latest
 	keyframe and send it immediately for new viewers, EXPERIMENTAL)
-videosimulcast = yes|no (do|don't enable video simulcasting)
+videosimulcast = true|false (do|don't enable video simulcasting)
 videoport2 = second local port for receiving video frames (only for rtp, and simulcasting)
 videoport3 = third local port for receiving video frames (only for rtp, and simulcasting)
-videoskew = yes|no (whether the plugin should perform skew
+videoskew = true|false (whether the plugin should perform skew
 	analisys and compensation on incoming video RTP stream, EXPERIMENTAL)
-videosvc = yes|no (whether the video will have SVC support; works only for VP9-SVC, default=no)
+videosvc = true|false (whether the video will have SVC support; works only for VP9-SVC, default=false)
 collision = in case of collision (more than one SSRC hitting the same port), the plugin
 	will discard incoming RTP packets with a new SSRC unless this many milliseconds
 	passed, which would then change the current SSRC (0=disabled)
 dataport = local port for receiving data messages to relay
 dataiface = network interface or IP address to bind to, if any (binds to all otherwise)
-databuffermsg = yes|no (whether the plugin should store the latest
+databuffermsg = true|false (whether the plugin should store the latest
 	message and send it immediately for new viewers)
 threads = number of threads to assist with the relaying part, which can help
 	if you expect a lot of viewers that may cause the RTP receiving part
@@ -126,7 +126,7 @@ The following options are only valid for the 'rstp' type:
 url = RTSP stream URL
 rtsp_user = RTSP authorization username, if needed
 rtsp_pwd = RTSP authorization password, if needed
-rtsp_failcheck = whether an error should be returned if connecting to the RTSP server fails (default=yes)
+rtsp_failcheck = whether an error should be returned if connecting to the RTSP server fails (default=true)
 rtspiface = network interface IP address or device name to listen on when receiving RTSP streams
 \endverbatim
  *
@@ -2187,6 +2187,8 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			json_t *secret = json_object_get(root, "secret");
 			if(secret && json_string_value(secret) && janus_strcmp_const_time(mp->secret, json_string_value(secret)))
 				admin = TRUE;
+		} else {
+			admin = TRUE;
 		}
 		json_t *ml = json_object();
 		json_object_set_new(ml, "id", json_integer(mp->id));
@@ -3253,6 +3255,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 							ht->num_viewers--;
 							ht->viewers = g_list_remove_all(ht->viewers, session);
 							janus_mutex_unlock(&ht->mutex);
+							JANUS_LOG(LOG_VERB, "Removing viewer from helper thread #%d (destroy)\n", ht->id);
 							break;
 						}
 						janus_mutex_unlock(&ht->mutex);
@@ -3367,7 +3370,9 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			}
 			if(audio) {
 				const char *codec = NULL;
-				if(strstr(mp->codecs.audio_rtpmap, "opus") || strstr(mp->codecs.audio_rtpmap, "OPUS"))
+				if (!mp->codecs.audio_rtpmap)
+					JANUS_LOG(LOG_ERR, "[%s] Audio RTP map is uninitialized\n", mp->name);
+				else if(strstr(mp->codecs.audio_rtpmap, "opus") || strstr(mp->codecs.audio_rtpmap, "OPUS"))
 					codec = "opus";
 				else if(strstr(mp->codecs.audio_rtpmap, "pcma") || strstr(mp->codecs.audio_rtpmap, "PCMA"))
 					codec = "pcma";
@@ -3389,7 +3394,9 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			}
 			if(video) {
 				const char *codec = NULL;
-				if(strstr(mp->codecs.video_rtpmap, "vp8") || strstr(mp->codecs.video_rtpmap, "VP8"))
+				if (!mp->codecs.video_rtpmap)
+					JANUS_LOG(LOG_ERR, "[%s] Video RTP map is uninitialized\n", mp->name);
+				else if(strstr(mp->codecs.video_rtpmap, "vp8") || strstr(mp->codecs.video_rtpmap, "VP8"))
 					codec = "vp8";
 				else if(strstr(mp->codecs.video_rtpmap, "vp9") || strstr(mp->codecs.video_rtpmap, "VP9"))
 					codec = "vp9";
@@ -3923,6 +3930,7 @@ static void janus_streaming_hangup_media_internal(janus_plugin_session *handle) 
 						ht->num_viewers--;
 						ht->viewers = g_list_remove_all(ht->viewers, session);
 						janus_mutex_unlock(&ht->mutex);
+						JANUS_LOG(LOG_VERB, "Removing viewer from helper thread #%d\n", ht->id);
 						break;
 					}
 					janus_mutex_unlock(&ht->mutex);
@@ -4478,8 +4486,8 @@ done:
 			janus_mutex_lock(&oldmp->mutex);
 			oldmp->viewers = g_list_remove_all(oldmp->viewers, session);
 			/* Remove the viewer from the helper threads too, if any */
-			if(mp->helper_threads > 0) {
-				GList *l = mp->threads;
+			if(oldmp->helper_threads > 0) {
+				GList *l = oldmp->threads;
 				while(l) {
 					janus_streaming_helper *ht = (janus_streaming_helper *)l->data;
 					janus_mutex_lock(&ht->mutex);
@@ -4487,6 +4495,7 @@ done:
 						ht->num_viewers--;
 						ht->viewers = g_list_remove_all(ht->viewers, session);
 						janus_mutex_unlock(&ht->mutex);
+						JANUS_LOG(LOG_VERB, "Removing viewer from helper thread #%d (switching)\n", ht->id);
 						break;
 					}
 					janus_mutex_unlock(&ht->mutex);
@@ -4511,7 +4520,7 @@ done:
 					}
 					l = l->next;
 				}
-				JANUS_LOG(LOG_INFO, "Adding viewer to helper thread %d\n", helper->id);
+				JANUS_LOG(LOG_VERB, "Adding viewer to helper thread #%d\n", helper->id);
 				janus_mutex_lock(&helper->mutex);
 				helper->viewers = g_list_append(helper->viewers, session);
 				helper->num_viewers++;
@@ -4803,7 +4812,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 	if(name == NULL) {
 		JANUS_LOG(LOG_VERB, "Missing name, will generate a random one...\n");
 		memset(tempname, 0, 255);
-		g_snprintf(tempname, 255, "%"SCNu64, id);
+		g_snprintf(tempname, 255, "mp-%"SCNu64, id);
 	}
 	if(!doaudio && !dovideo && !dodata) {
 		JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream, no audio, video or data have to be streamed...\n");
@@ -5196,7 +5205,7 @@ janus_streaming_mountpoint *janus_streaming_create_file_source(
 	char tempname[255];
 	if(!name) {
 		memset(tempname, 0, 255);
-		g_snprintf(tempname, 255, "%"SCNu64, file_source->id);
+		g_snprintf(tempname, 255, "mp-%"SCNu64, file_source->id);
 	}
 	file_source->name = g_strdup(name ? name : tempname);
 	char *description = NULL;
@@ -5491,8 +5500,8 @@ static int janus_streaming_rtsp_connect_to_server(janus_streaming_mountpoint *mp
 			char *dash = NULL;
 			vsport = strtol(server_ports+strlen(";server_port="), &dash, 10);
 			vsport_rtcp = dash ? strtol(++dash, NULL, 10) : 0;
-			JANUS_LOG(LOG_VERB, "  -- RTP port (video): %"SCNu16"\n", vsport);
-			JANUS_LOG(LOG_VERB, "  -- RTCP port (video): %"SCNu16"\n", vsport_rtcp);
+			JANUS_LOG(LOG_VERB, "  -- RTP port (video): %d\n", vsport);
+			JANUS_LOG(LOG_VERB, "  -- RTCP port (video): %d\n", vsport_rtcp);
 		}
 	}
 
@@ -5555,8 +5564,8 @@ static int janus_streaming_rtsp_connect_to_server(janus_streaming_mountpoint *mp
 			char *dash = NULL;
 			asport = strtol(server_ports+strlen(";server_port="), &dash, 10);
 			asport_rtcp = dash ? strtol(++dash, NULL, 10) : 0;
-			JANUS_LOG(LOG_VERB, "  -- RTP port (audio): %"SCNu16"\n", asport);
-			JANUS_LOG(LOG_VERB, "  -- RTCP port (audio): %"SCNu16"\n", asport_rtcp);
+			JANUS_LOG(LOG_VERB, "  -- RTP port (audio): %d\n", asport);
+			JANUS_LOG(LOG_VERB, "  -- RTCP port (audio): %d\n", asport_rtcp);
 		}
 	}
 
@@ -5642,19 +5651,19 @@ static int janus_streaming_rtsp_play(janus_streaming_rtp_source *source) {
 	/* First of all, send a latching packet to the RTSP server port(s) */
 	struct sockaddr remote;
 	if(source->remote_audio_port > 0 && source->audio_fd >= 0) {
-		JANUS_LOG(LOG_VERB, "RTSP audio latching: %s:%"SCNu16"\n", source->rtsp_ahost, source->remote_audio_port);
+		JANUS_LOG(LOG_VERB, "RTSP audio latching: %s:%d\n", source->rtsp_ahost, source->remote_audio_port);
 		janus_streaming_rtsp_latch(source->audio_fd, source->rtsp_ahost, source->remote_audio_port, &remote);
 		if(source->remote_audio_rtcp_port > 0 && source->audio_rtcp_fd >= 0) {
-			JANUS_LOG(LOG_VERB, "  -- RTCP: %s:%"SCNu16"\n", source->rtsp_ahost, source->remote_audio_rtcp_port);
+			JANUS_LOG(LOG_VERB, "  -- RTCP: %s:%d\n", source->rtsp_ahost, source->remote_audio_rtcp_port);
 			janus_streaming_rtsp_latch(source->audio_rtcp_fd, source->rtsp_ahost,
 				source->remote_audio_rtcp_port, &source->audio_rtcp_addr);
 		}
 	}
 	if(source->remote_video_port > 0 && source->video_fd[0] >= 0) {
-		JANUS_LOG(LOG_WARN, "RTSP video latching: %s:%"SCNu16"\n", source->rtsp_vhost, source->remote_video_port);
+		JANUS_LOG(LOG_VERB, "RTSP video latching: %s:%d\n", source->rtsp_vhost, source->remote_video_port);
 		janus_streaming_rtsp_latch(source->video_fd[0], source->rtsp_vhost, source->remote_video_port, &remote);
 		if(source->remote_video_rtcp_port > 0 && source->video_rtcp_fd >= 0) {
-			JANUS_LOG(LOG_WARN, "  -- RTCP: %s:%"SCNu16"\n", source->rtsp_vhost, source->remote_video_rtcp_port);
+			JANUS_LOG(LOG_VERB, "  -- RTCP: %s:%d\n", source->rtsp_vhost, source->remote_video_rtcp_port);
 			janus_streaming_rtsp_latch(source->video_rtcp_fd, source->rtsp_vhost,
 				source->remote_video_rtcp_port, &source->video_rtcp_addr);
 		}
@@ -5666,7 +5675,7 @@ static int janus_streaming_rtsp_play(janus_streaming_rtp_source *source) {
 	source->curldata->size = 0;
 	JANUS_LOG(LOG_VERB, "Sending PLAY request...\n");
 	curl_easy_setopt(source->curl, CURLOPT_RTSP_STREAM_URI, source->rtsp_url);
-	curl_easy_setopt(source->curl, CURLOPT_RANGE, "0.000-");
+	curl_easy_setopt(source->curl, CURLOPT_RANGE, "npt=0.000-");
 	curl_easy_setopt(source->curl, CURLOPT_RTSP_REQUEST, (long)CURL_RTSPREQ_PLAY);
 	int res = curl_easy_perform(source->curl);
 	if(res != CURLE_OK) {
@@ -6350,8 +6359,8 @@ static void *janus_streaming_relay_thread(void *data) {
 #endif
 					addrlen = sizeof(remote);
 					bytes = recvfrom(audio_fd, buffer, 1500, 0, &remote, &addrlen);
-					if(bytes < 0) {
-						/* Failed to read? */
+					if(!janus_is_rtp(buffer, bytes)) {
+						/* Failed to read or not an RTP packet? */
 						continue;
 					}
 					janus_rtp_header *rtp = (janus_rtp_header *)buffer;
@@ -6439,8 +6448,8 @@ static void *janus_streaming_relay_thread(void *data) {
 #endif
 					addrlen = sizeof(remote);
 					bytes = recvfrom(fds[i].fd, buffer, 1500, 0, &remote, &addrlen);
-					if(bytes < 0) {
-						/* Failed to read? */
+					if(!janus_is_rtp(buffer, bytes)) {
+						/* Failed to read or not an RTP packet? */
 						continue;
 					}
 					janus_rtp_header *rtp = (janus_rtp_header *)buffer;
@@ -6680,7 +6689,7 @@ static void *janus_streaming_relay_thread(void *data) {
 #endif
 					addrlen = sizeof(remote);
 					bytes = recvfrom(data_fd, buffer, 1500, 0, &remote, &addrlen);
-					if(bytes < 0) {
+					if(bytes < 1) {
 						/* Failed to read? */
 						continue;
 					}
@@ -6716,8 +6725,8 @@ static void *janus_streaming_relay_thread(void *data) {
 				} else if(audio_rtcp_fd != -1 && fds[i].fd == audio_rtcp_fd) {
 					addrlen = sizeof(remote);
 					bytes = recvfrom(audio_rtcp_fd, buffer, 1500, 0, &remote, &addrlen);
-					if(bytes < 0) {
-						/* Failed to read? */
+					if(!janus_is_rtcp(buffer, bytes)) {
+						/* Failed to read or not an RTCP packet? */
 						continue;
 					}
 					memcpy(&source->audio_rtcp_addr, &remote, addrlen);
@@ -6736,8 +6745,8 @@ static void *janus_streaming_relay_thread(void *data) {
 				} else if(video_rtcp_fd != -1 && fds[i].fd == video_rtcp_fd) {
 					addrlen = sizeof(remote);
 					bytes = recvfrom(video_rtcp_fd, buffer, 1500, 0, &remote, &addrlen);
-					if(bytes < 0) {
-						/* Failed to read? */
+					if(!janus_is_rtcp(buffer, bytes)) {
+						/* Failed to read or not an RTCP packet? */
 						continue;
 					}
 					memcpy(&source->video_rtcp_addr, &remote, addrlen);
@@ -7069,7 +7078,7 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 			return;
 		char *text = (char *)packet->data;
 		if(gateway != NULL && text != NULL)
-			gateway->relay_data(session->handle, text, strlen(text));
+			gateway->relay_data(session->handle, NULL, text, strlen(text));
 	}
 
 	return;
