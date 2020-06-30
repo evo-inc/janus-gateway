@@ -13,7 +13,7 @@
  * WebSockets interface will need to include, when needed, additional
  * pieces of information like \c session_id and \c handle_id. That is,
  * where you'd send a Janus request related to a specific session to the
- * \c /janus/<session> path, with WebSockets you'd have to send the same
+ * \c /janus/\<session> path, with WebSockets you'd have to send the same
  * request with an additional \c session_id field in the JSON payload.
  * The same applies for the handle. The JavaScript library (janus.js)
  * implements all of this on the client side automatically.
@@ -104,6 +104,12 @@ static janus_transport_callbacks *gateway = NULL;
 static gboolean ws_janus_api_enabled = FALSE;
 static gboolean ws_admin_api_enabled = FALSE;
 static gboolean notify_events = TRUE;
+
+/* Clients maps */
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+static GHashTable *clients = NULL, *writable_clients = NULL;
+#endif
+static janus_mutex writable_mutex;
 
 /* JSON serialization options */
 static size_t json_format = JSON_INDENT(3) | JSON_PRESERVE_ORDER;
@@ -265,6 +271,10 @@ static const char *janus_websockets_reason_string(enum lws_callback_reasons reas
 	return NULL;
 }
 
+#if (LWS_LIBRARY_VERSION_MAJOR >= 4)
+static lws_retry_bo_t pingpong = { 0 };
+#endif
+
 /* Helper method to return the interface associated with a local IP address */
 static char *janus_websockets_get_interface_name(const char *ip) {
 	struct ifaddrs *addrs = NULL, *iap = NULL;
@@ -298,8 +308,8 @@ static char *janus_websockets_get_interface_name(const char *ip) {
 }
 
 /* WebSockets ACL list for both Janus and Admin API */
-GList *janus_websockets_access_list = NULL, *janus_websockets_admin_access_list = NULL;
-janus_mutex access_list_mutex;
+static GList *janus_websockets_access_list = NULL, *janus_websockets_admin_access_list = NULL;
+static janus_mutex access_list_mutex;
 static void janus_websockets_allow_address(const char *ip, gboolean admin) {
 	if(ip == NULL)
 		return;
@@ -524,11 +534,21 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 		if((pingpong_trigger && !pingpong_timeout) || (!pingpong_trigger && pingpong_timeout)) {
 			JANUS_LOG(LOG_WARN, "pingpong_trigger and pingpong_timeout not both set, ignoring...\n");
 		}
-#if (LWS_LIBRARY_VERSION_MAJOR >= 2 && LWS_LIBRARY_VERSION_MINOR >= 1) || (LWS_LIBRARY_VERSION_MAJOR >= 3)
+#if (LWS_LIBRARY_VERSION_MAJOR >= 4)
+		/* libwebsockets 4 has a different API, that works differently
+		 * https://github.com/warmcat/libwebsockets/blob/master/READMEs/README.lws_retry.md */
+		if(pingpong_trigger > 0 && pingpong_timeout > 0) {
+			pingpong.secs_since_valid_ping = pingpong_trigger;
+			pingpong.secs_since_valid_hangup = pingpong_trigger + pingpong_timeout;
+			wscinfo.retry_and_idle_policy = &pingpong;
+		}
+#else
+#if (LWS_LIBRARY_VERSION_MAJOR >= 2 && LWS_LIBRARY_VERSION_MINOR >= 1) || (LWS_LIBRARY_VERSION_MAJOR == 3)
 		if(pingpong_trigger > 0 && pingpong_timeout > 0) {
 			wscinfo.ws_ping_pong_interval = pingpong_trigger;
 			wscinfo.timeout_secs = pingpong_timeout;
 		}
+#endif
 #endif
 		/* Force single-thread server */
 		wscinfo.count_threads = 1;
@@ -546,10 +566,12 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 		if(!item || !item->value || !janus_is_true(item->value)) {
 			JANUS_LOG(LOG_WARN, "WebSockets server disabled\n");
 		} else {
-			int wsport = 8188;
+			uint16_t wsport = 8188;
 			item = janus_config_get(config, config_general, janus_config_type_item, "ws_port");
-			if(item && item->value)
-				wsport = atoi(item->value);
+			if(item && item->value && janus_string_to_uint16(item->value, &wsport) < 0) {
+				JANUS_LOG(LOG_ERR, "Invalid port (%s), falling back to default\n", item->value);
+				wsport = 8188;
+			}
 			char *interface = NULL;
 			item = janus_config_get(config, config_general, janus_config_type_item, "ws_interface");
 			if(item && item->value)
@@ -590,10 +612,12 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 		if(!item || !item->value || !janus_is_true(item->value)) {
 			JANUS_LOG(LOG_WARN, "Secure WebSockets server disabled\n");
 		} else {
-			int wsport = 8989;
+			uint16_t wsport = 8989;
 			item = janus_config_get(config, config_general, janus_config_type_item, "wss_port");
-			if(item && item->value)
-				wsport = atoi(item->value);
+			if(item && item->value && janus_string_to_uint16(item->value, &wsport) < 0) {
+				JANUS_LOG(LOG_ERR, "Invalid port (%s), falling back to default\n", item->value);
+				wsport = 8989;
+			}
 			char *interface = NULL;
 			item = janus_config_get(config, config_general, janus_config_type_item, "wss_interface");
 			if(item && item->value)
@@ -615,6 +639,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				char *server_pem = (char *)item->value;
 				char *server_key = (char *)item->value;
 				char *password = NULL;
+				char *ciphers = NULL;
 				item = janus_config_get(config, config_certs, janus_config_type_item, "cert_key");
 				if(item && item->value)
 					server_key = (char *)item->value;
@@ -622,6 +647,9 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				if(item && item->value)
 					password = (char *)item->value;
 				JANUS_LOG(LOG_VERB, "Using certificates:\n\t%s\n\t%s\n", server_pem, server_key);
+				item = janus_config_get(config, config_certs, janus_config_type_item, "ciphers");
+				if(item && item->value)
+					ciphers = (char *)item->value;
 				/* Prepare secure context */
 				struct lws_context_creation_info info;
 				memset(&info, 0, sizeof info);
@@ -632,6 +660,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				info.ssl_cert_filepath = server_pem;
 				info.ssl_private_key_filepath = server_key;
 				info.ssl_private_key_password = password;
+				info.ssl_cipher_list = ciphers;
 				info.gid = -1;
 				info.uid = -1;
 #if LWS_LIBRARY_VERSION_MAJOR >= 2
@@ -654,10 +683,12 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 		if(!item || !item->value || !janus_is_true(item->value)) {
 			JANUS_LOG(LOG_WARN, "Admin WebSockets server disabled\n");
 		} else {
-			int wsport = 7188;
+			uint16_t wsport = 7188;
 			item = janus_config_get(config, config_admin, janus_config_type_item, "admin_ws_port");
-			if(item && item->value)
-				wsport = atoi(item->value);
+			if(item && item->value && janus_string_to_uint16(item->value, &wsport) < 0) {
+				JANUS_LOG(LOG_ERR, "Invalid port (%s), falling back to default\n", item->value);
+				wsport = 7188;
+			}
 			char *interface = NULL;
 			item = janus_config_get(config, config_admin, janus_config_type_item, "admin_ws_interface");
 			if(item && item->value)
@@ -698,10 +729,12 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 		if(!item || !item->value || !janus_is_true(item->value)) {
 			JANUS_LOG(LOG_WARN, "Secure Admin WebSockets server disabled\n");
 		} else {
-			int wsport = 7989;
+			uint16_t wsport = 7989;
 			item = janus_config_get(config, config_admin, janus_config_type_item, "admin_wss_port");
-			if(item && item->value)
-				wsport = atoi(item->value);
+			if(item && item->value && janus_string_to_uint16(item->value, &wsport) < 0) {
+				JANUS_LOG(LOG_ERR, "Invalid port (%s), falling back to default\n", item->value);
+				wsport = 7989;
+			}
 			char *interface = NULL;
 			item = janus_config_get(config, config_admin, janus_config_type_item, "admin_wss_interface");
 			if(item && item->value)
@@ -723,6 +756,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				char *server_pem = (char *)item->value;
 				char *server_key = (char *)item->value;
 				char *password = NULL;
+				char *ciphers = NULL;
 				item = janus_config_get(config, config_certs, janus_config_type_item, "cert_key");
 				if(item && item->value)
 					server_key = (char *)item->value;
@@ -730,6 +764,9 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				if(item && item->value)
 					password = (char *)item->value;
 				JANUS_LOG(LOG_VERB, "Using certificates:\n\t%s\n\t%s\n", server_pem, server_key);
+				item = janus_config_get(config, config_certs, janus_config_type_item, "ciphers");
+				if(item && item->value)
+					ciphers = (char *)item->value;
 				/* Prepare secure context */
 				struct lws_context_creation_info info;
 				memset(&info, 0, sizeof info);
@@ -740,6 +777,7 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 				info.ssl_cert_filepath = server_pem;
 				info.ssl_private_key_filepath = server_key;
 				info.ssl_private_key_password = password;
+				info.ssl_cipher_list = ciphers;
 				info.gid = -1;
 				info.uid = -1;
 #if LWS_LIBRARY_VERSION_MAJOR >= 2
@@ -768,15 +806,23 @@ int janus_websockets_init(janus_transport_callbacks *callback, const char *confi
 	ws_janus_api_enabled = wss || swss;
 	ws_admin_api_enabled = admin_wss || admin_swss;
 
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+	clients = g_hash_table_new(NULL, NULL);
+	writable_clients = g_hash_table_new(NULL, NULL);
+#endif
+	janus_mutex_init(&writable_mutex);
+
 	g_atomic_int_set(&initialized, 1);
 
 	GError *error = NULL;
 	/* Start the WebSocket service thread */
 	if(ws_janus_api_enabled || ws_admin_api_enabled) {
 		ws_thread = g_thread_try_new("ws thread", &janus_websockets_thread, wsc, &error);
-		if(!ws_thread) {
+		if(error != NULL) {
 			g_atomic_int_set(&initialized, 0);
-			JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the WebSockets thread...\n", error->code, error->message ? error->message : "??");
+			JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the WebSockets thread...\n",
+				error->code, error->message ? error->message : "??");
+			g_error_free(error);
 			return -1;
 		}
 	}
@@ -803,6 +849,15 @@ void janus_websockets_destroy(void) {
 		wsc = NULL;
 	}
 
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+	janus_mutex_lock(&writable_mutex);
+	g_hash_table_destroy(clients);
+	clients = NULL;
+	g_hash_table_destroy(writable_clients);
+	writable_clients = NULL;
+	janus_mutex_unlock(&writable_mutex);
+#endif
+
 	g_atomic_int_set(&initialized, 0);
 	g_atomic_int_set(&stopping, 0);
 	JANUS_LOG(LOG_INFO, "%s destroyed!\n", JANUS_WEBSOCKETS_NAME);
@@ -812,11 +867,21 @@ static void janus_websockets_destroy_client(
 		janus_websockets_client *ws_client,
 		struct lws *wsi,
 		const char *log_prefix) {
-	if(!ws_client || !g_atomic_int_compare_and_exchange(&ws_client->destroyed, 0, 1))
+	if(!ws_client || !ws_client->ts)
 		return;
-	/* Cleanup */
 	janus_mutex_lock(&ws_client->ts->mutex);
+	if(!g_atomic_int_compare_and_exchange(&ws_client->destroyed, 0, 1)) {
+		janus_mutex_unlock(&ws_client->ts->mutex);
+		return;
+	}
+	/* Cleanup */
 	JANUS_LOG(LOG_INFO, "[%s-%p] Destroying WebSocket client\n", log_prefix, wsi);
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+	janus_mutex_lock(&writable_mutex);
+	g_hash_table_remove(clients, ws_client);
+	g_hash_table_remove(writable_clients, ws_client);
+	janus_mutex_unlock(&writable_mutex);
+#endif
 	ws_client->wsi = NULL;
 	/* Notify handlers about this transport being gone */
 	if(notify_events && gateway->events_is_enabled()) {
@@ -901,7 +966,19 @@ int janus_websockets_send_message(janus_transport_session *transport, void *requ
 	/* Convert to string and enqueue */
 	char *payload = json_dumps(message, json_format);
 	g_async_queue_push(client->messages, payload);
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+	/* On libwebsockets >= 3.x we use lws_cancel_service */
+	janus_mutex_lock(&writable_mutex);
+	if(g_hash_table_lookup(clients, client) == client)
+		g_hash_table_insert(writable_clients, client, client);
+	janus_mutex_unlock(&writable_mutex);
+	lws_cancel_service(wsc);
+#else
+	/* On libwebsockets < 3.x we use lws_callback_on_writable */
+	janus_mutex_lock(&writable_mutex);
 	lws_callback_on_writable(client->wsi);
+	janus_mutex_unlock(&writable_mutex);
+#endif
 	janus_mutex_unlock(&transport->mutex);
 	json_decref(message);
 	return 0;
@@ -1020,6 +1097,11 @@ static int janus_websockets_common_callback(
 			ws_client->bufoffset = 0;
 			g_atomic_int_set(&ws_client->destroyed, 0);
 			ws_client->ts = janus_transport_session_create(ws_client, NULL);
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+			janus_mutex_lock(&writable_mutex);
+			g_hash_table_insert(clients, ws_client, ws_client);
+			janus_mutex_unlock(&writable_mutex);
+#endif
 			/* Let us know when the WebSocket channel becomes writeable */
 			lws_callback_on_writable(wsi);
 			JANUS_LOG(LOG_VERB, "[%s-%p]   -- Ready to be used!\n", log_prefix, wsi);
@@ -1072,6 +1154,25 @@ static int janus_websockets_common_callback(
 			gateway->incoming_request(&janus_websockets_transport, ws_client->ts, NULL, admin, root, &error);
 			return 0;
 		}
+#if (LWS_LIBRARY_VERSION_MAJOR >= 3)
+		/* On libwebsockets >= 3.x, we use this event to mark connections as writable in the event loop */
+		case LWS_CALLBACK_EVENT_WAIT_CANCELLED: {
+			janus_mutex_lock(&writable_mutex);
+			/* We iterate on all the clients we marked as writable and act on them */
+			GHashTableIter iter;
+			gpointer value;
+			g_hash_table_iter_init(&iter, writable_clients);
+			while(g_hash_table_iter_next(&iter, NULL, &value)) {
+				janus_websockets_client *client = value;
+				if(client == NULL || client->wsi == NULL)
+					continue;
+				lws_callback_on_writable(client->wsi);
+			}
+			g_hash_table_remove_all(writable_clients);
+			janus_mutex_unlock(&writable_mutex);
+			return 0;
+		}
+#endif
 		case LWS_CALLBACK_SERVER_WRITEABLE: {
 			if(ws_client == NULL || ws_client->wsi == NULL) {
 				JANUS_LOG(LOG_ERR, "[%s-%p] Invalid WebSocket client instance...\n", log_prefix, wsi);
@@ -1079,6 +1180,23 @@ static int janus_websockets_common_callback(
 			}
 			if(!g_atomic_int_get(&ws_client->destroyed) && !g_atomic_int_get(&stopping)) {
 				janus_mutex_lock(&ws_client->ts->mutex);
+
+				/* Check if Websockets send pipe is choked */
+				if(lws_send_pipe_choked(wsi)) {
+					if(ws_client->buffer && ws_client->bufpending > 0 && ws_client->bufoffset > 0) {
+						JANUS_LOG(LOG_WARN, "Websockets choked with buffer: %d, trying again\n", ws_client->bufpending);
+						lws_callback_on_writable(wsi);
+					} else {
+						gint qlen = g_async_queue_length(ws_client->messages);
+						JANUS_LOG(LOG_WARN, "Websockets choked with queue: %d, trying again\n", qlen);
+						if(qlen > 0) {
+							lws_callback_on_writable(wsi);
+						}
+					}
+					janus_mutex_unlock(&ws_client->ts->mutex);
+					return 0;
+				}
+
 				/* Check if we have a pending/partial write to complete first */
 				if(ws_client->buffer && ws_client->bufpending > 0 && ws_client->bufoffset > 0
 						&& !g_atomic_int_get(&ws_client->destroyed) && !g_atomic_int_get(&stopping)) {

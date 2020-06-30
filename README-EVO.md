@@ -9,18 +9,11 @@ $ git merge upstream/master OR git merge [tag]
 ```
 Fix conflicts
 
-To see the original change set:
-`$ git diff 90fa6b6 71df9ee`
-Also incorporate the change from 390e8e67.
-
-Changes we have dropped as of 20 Sep 2018:
- - sdeslen in `ice.c`, upstream fixed this
- - cnamelen in `rtcp.c`, upstream fixed this
- - logs in `utils.c`
-
-Changes we keep as of 20 Sep 2018:
- - add name resolution to `janus_network_string_to_address` in `ip-utils.c`
- - add `set_tokens` in `janus.c`
- - add SEI/SPS/PPS, `last_received_rtcp`, `janus_streaming_stop`, `janus_streaming_send_event`, stopping on timeout in `janus_streaming_relay_rtp_packet`, `janus_streaming_is_nal_type` in `plugins/janus_streaming.c`
- - error logs to libmicrohttpd in `transports/janus_http.c`
- - `g_free(source->xxx->data)` in plugins/janus_streaming.c
+Changes we keep as of Jun 2020:
+1. Support for domain names in TURN API response (ip-utils.c; commits d996658 b48fb20 71df9ee)
+2. Libmicrohttpd debug logs (transports/janus_http.c)
+3. Talkback using u-law over data channel (configure.ac, janus_streaming.c, sctp.c; commits 25c6518 a89bb60)
+4. Handle old GCC issue (version.h)
+TODO:
+1. Fix REST API use by apps. Currently we can only stream if we set up using RMQ.
+2. Check if we still need the RTCP timeout in commit 99718e8.
