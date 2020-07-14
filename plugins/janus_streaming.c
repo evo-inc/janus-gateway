@@ -1239,6 +1239,7 @@ typedef struct janus_streaming_session {
 	volatile gint hangingup;
 	volatile gint destroyed;
 	janus_refcount ref;
+	gint64 last_received_rtcp; /* Used to detect when listeners vanish */
 #ifdef HAVE_LIBPULSE
 	gboolean talkback;
 	pa_simple* talkback_pulse;
@@ -1558,6 +1559,34 @@ static void janus_streaming_rtcp_remb_send(janus_streaming_rtp_source *source) {
 	} else {
 		JANUS_LOG(LOG_HUGE, "Sent %d/%d bytes\n", sent, rtcp_len);
 	}
+}
+
+static void janus_streaming_send_event(janus_streaming_session* session, json_t *result) {
+	json_t *event = json_object();
+	json_object_set_new(event, "streaming", json_string("event"));
+	if(result != NULL)
+		json_object_set_new(event, "result", result);
+	int ret = gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
+	JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (%s)\n", ret, janus_get_api_error(ret));
+	json_decref(event);
+}
+
+static json_t *janus_streaming_stop_streaming(janus_streaming_session *session) {
+	JANUS_LOG(LOG_VERB, "Stopping the streaming\n");
+	json_t *result = json_object();
+	json_object_set_new(result, "status", json_string("stopping"));
+	/* Also notify event handlers */
+	if(notify_events && gateway->events_is_enabled()) {
+		json_t *info = json_object();
+		json_object_set_new(info, "status", json_string("stopping"));
+		janus_streaming_mountpoint *mp = session->mountpoint;
+		if(mp)
+			json_object_set_new(info, "id", string_ids ? json_string(mp->id_str) : json_integer(mp->id));
+		gateway->notify_event(&janus_streaming_plugin, session->handle, info);
+	}
+	/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
+	gateway->close_pc(session->handle);
+	return result;
 }
 
 /* Error codes */
@@ -2344,6 +2373,7 @@ void janus_streaming_create_session(janus_plugin_session *handle, int *error) {
 	g_atomic_int_set(&session->hangingup, 0);
 	handle->plugin_handle = session;
 	janus_refcount_init(&session->ref, janus_streaming_session_free);
+	session->last_received_rtcp = janus_get_monotonic_time();
 	janus_mutex_lock(&sessions_mutex);
 	g_hash_table_insert(sessions, handle, session);
 	janus_mutex_unlock(&sessions_mutex);
@@ -4494,6 +4524,7 @@ void janus_streaming_incoming_rtcp(janus_plugin_session *handle, janus_plugin_rt
 	janus_streaming_mountpoint *mp = (janus_streaming_mountpoint *)session->mountpoint;
 	if(mp->streaming_source != janus_streaming_source_rtp)
 		return;
+	session->last_received_rtcp = janus_get_monotonic_time();
 	janus_streaming_rtp_source *source = (janus_streaming_rtp_source *)mp->source;
 	gboolean video = packet->video;
 	char *buf = packet->buffer;
@@ -5533,20 +5564,8 @@ done:
 				janus_streaming_message_free(msg);
 				continue;
 			}
-			JANUS_LOG(LOG_VERB, "Stopping the streaming\n");
-			result = json_object();
-			json_object_set_new(result, "status", json_string("stopping"));
-			/* Also notify event handlers */
-			if(notify_events && gateway->events_is_enabled()) {
-				json_t *info = json_object();
-				json_object_set_new(info, "status", json_string("stopping"));
-				janus_streaming_mountpoint *mp = session->mountpoint;
-				if(mp)
-					json_object_set_new(info, "id", string_ids ? json_string(mp->id_str) : json_integer(mp->id));
-				gateway->notify_event(&janus_streaming_plugin, session->handle, info);
-			}
-			/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
-			gateway->close_pc(session->handle);
+			JANUS_LOG(LOG_VERB, "User stop\n");
+			result = janus_streaming_stop_streaming(session);
 		} else {
 			JANUS_LOG(LOG_VERB, "Unknown request '%s'\n", request_text);
 			error_code = JANUS_STREAMING_ERROR_INVALID_REQUEST;
@@ -8399,6 +8418,12 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 	if(!packet->is_keyframe && (!g_atomic_int_get(&session->started) || g_atomic_int_get(&session->paused))) {
 		//~ JANUS_LOG(LOG_ERR, "Streaming not started yet for this session...\n");
 		return;
+	}
+
+	gint64 now = janus_get_monotonic_time();
+	if (now - session->last_received_rtcp > 20000000L) {
+		JANUS_LOG(LOG_INFO, "Stopping due to 20 sec since RTCP received\n");
+		janus_streaming_send_event(session, janus_streaming_stop_streaming(session));
 	}
 
 	if(packet->is_rtp) {
