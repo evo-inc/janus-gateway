@@ -50,14 +50,10 @@ else
 
 var janus = null;
 var echotest = null;
-var opaqueId = "devicetest-"+Janus.randomString(12);
+var opaqueId = "canvas-"+Janus.randomString(12);
 
-var firstTime = true;
 var bitrateTimer = null;
 var spinner = null;
-
-var audioDeviceId = null;
-var videoDeviceId = null;
 
 var audioenabled = false;
 var videoenabled = false;
@@ -69,127 +65,20 @@ var vcodec = (getQueryStringValue("vcodec") !== "" ? getQueryStringValue("vcodec
 var vprofile = (getQueryStringValue("vprofile") !== "" ? getQueryStringValue("vprofile") : null);
 var simulcastStarted = false;
 
-// Helper method to prepare a UI selection of the available devices
-function initDevices(devices) {
-	$('#devices').removeClass('hide');
-	$('#devices').parent().removeClass('hide');
-	$('#choose-device').click(restartCapture);
-	var audio = $('#audio-device').val();
-	var video = $('#video-device').val();
-	$('#audio-device, #video-device').find('option').remove();
+// We'll try to do 15 frames per second: should be relatively fluid, and
+// most important should be doable in JavaScript on lower end machines too
+var fps = 15;
+// Let's add some placeholders for the tweaks we can configure
+var myText = "Hi there!";
+var myColor = "white";
+var myFont = "20pt Calibri";
+var myX = 15, myY = 223;
+// As the "watermark", we'll use a smaller version of the Janus logo
+var logoUrl = "./janus-logo-small.png";
+var logoW = 340, logoH = 110;
+var logoS = 0.4;
+var logoX = 432 - logoW*logoS - 5, logoY = 5;
 
-	devices.forEach(function(device) {
-		var label = device.label;
-		if(!label || label === "")
-			label = device.deviceId;
-		var option = $('<option value="' + device.deviceId + '">' + label + '</option>');
-		if(device.kind === 'audioinput') {
-			$('#audio-device').append(option);
-		} else if(device.kind === 'videoinput') {
-			$('#video-device').append(option);
-		} else if(device.kind === 'audiooutput') {
-			// Apparently only available from Chrome 49 on?
-			// https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/setSinkId
-			// Definitely missing in Safari at the moment: https://bugs.webkit.org/show_bug.cgi?id=179415
-			$('#output-devices').removeClass('hide');
-			$('#audiooutput').append('<li><a href="#" id="' + device.deviceId + '">' + label + '</a></li>');
-			$('#audiooutput a').unbind('click')
-				.click(function() {
-					var deviceId = $(this).attr("id");
-					var label = $(this).text();
-					Janus.log("Trying to set device " + deviceId + " (" + label + ") as sink for the output");
-					if($('#peervideo').length === 0) {
-						Janus.error("No remote video element available");
-						bootbox.alert("No remote video element available");
-						return false;
-					}
-					if(!$('#peervideo').get(0).setSinkId) {
-						Janus.error("SetSinkId not supported");
-						bootbox.warn("SetSinkId not supported");
-						return false;
-					}
-					$('#peervideo').get(0).setSinkId(deviceId)
-						.then(function() {
-							Janus.log('Audio output device attached:', deviceId);
-							$('#outputdeviceset').html(label + '<span class="caret"></span>').parent().removeClass('open');
-						}).catch(function(error) {
-							Janus.error(error);
-							bootbox.alert(error);
-						});
-					return false;
-				});
-		}
-	});
-
-	$('#audio-device').val(audio);
-	$('#video-device').val(video);
-
-	$('#change-devices').click(function() {
-		// A different device has been selected: hangup the session, and set it up again
-		$('#audio-device, #video-device').attr('disabled', true);
-		$('#change-devices').attr('disabled', true);
-		if(firstTime) {
-			firstTime = false;
-			restartCapture();
-			return;
-		}
-		restartCapture();
-	});
-}
-
-function restartCapture() {
-	// Negotiate WebRTC
-	var body = { audio: true, video: true };
-	// We can try and force a specific codec, by telling the plugin what we'd prefer
-	// For simplicity, you can set it via a query string (e.g., ?vcodec=vp9)
-	if(acodec)
-		body["audiocodec"] = acodec;
-	if(vcodec)
-		body["videocodec"] = vcodec;
-	// For the codecs that support them (VP9 and H.264) you can specify a codec
-	// profile as well (e.g., ?vprofile=2 for VP9, or ?vprofile=42e01f for H.264)
-	if(vprofile)
-		body["videoprofile"] = vprofile;
-	Janus.debug("Sending message:", body);
-	echotest.send({ message: body });
-	Janus.debug("Trying a createOffer too (audio/video sendrecv)");
-	var replaceAudio = $('#audio-device').val() !== audioDeviceId;
-	audioDeviceId = $('#audio-device').val();
-	var replaceVideo = $('#video-device').val() !== videoDeviceId;
-	videoDeviceId = $('#video-device').val();
-	echotest.createOffer(
-		{
-			// We provide a specific device ID for both audio and video
-			media: {
-				audio: {
-					deviceId: {
-						exact: audioDeviceId
-					}
-				},
-				replaceAudio: replaceAudio,	// This is only needed in case of a renegotiation
-				video: {
-					deviceId: {
-						exact: videoDeviceId
-					}
-				},
-				replaceVideo: replaceVideo,	// This is only needed in case of a renegotiation
-				data: true	// Let's negotiate data channels as well
-			},
-			// If you want to test simulcasting (Chrome and Firefox only), then
-			// pass a ?simulcast=true when opening this demo page: it will turn
-			// the following 'simulcast' property to pass to janus.js to true
-			simulcast: doSimulcast,
-			simulcast2: doSimulcast2,
-			success: function(jsep) {
-				Janus.debug("Got SDP!", jsep);
-				echotest.send({ message: body, jsep: jsep });
-			},
-			error: function(error) {
-				Janus.error("WebRTC error:", error);
-				bootbox.alert("WebRTC error... " + error.message);
-			}
-		});
-}
 
 $(document).ready(function() {
 	// Initialize the library (all console debuggers enabled)
@@ -225,9 +114,8 @@ $(document).ready(function() {
 									$('#details').remove();
 									echotest = pluginHandle;
 									Janus.log("Plugin attached! (" + echotest.getPlugin() + ", id=" + echotest.getId() + ")");
-									// Enumerate devices: that's what we're here for
-									Janus.listDevices(initDevices);
-									// We wait for the user to select the first device before making a move
+									// We're connected to the plugin, create and populate the canvas element
+									createCanvas();
 									$('#start').removeAttr('disabled').html("Stop")
 										.click(function() {
 											$(this).attr('disabled', true);
@@ -291,20 +179,11 @@ $(document).ready(function() {
 											$('#myvideo').remove();
 											$('#waitingvideo').remove();
 											$('#peervideo').remove();
-											audioenabled = true;
-											$('#toggleaudio').attr('disabled', true).html("Disable audio").removeClass("btn-success").addClass("btn-danger");
-											videoenabled = true;
-											$('#togglevideo').attr('disabled', true).html("Disable video").removeClass("btn-success").addClass("btn-danger");
+											$('#toggleaudio').attr('disabled', true);
+											$('#togglevideo').attr('disabled', true);
 											$('#bitrate').attr('disabled', true);
-											$('#bitrateset').html('Bandwidth<span class="caret"></span>');
 											$('#curbitrate').hide();
-											if(bitrateTimer)
-												clearInterval(bitrateTimer);
-											bitrateTimer = null;
 											$('#curres').hide();
-											$('#datasend').val('').attr('disabled', true);
-											$('#datarecv').val('');
-											$('#outputdeviceset').html('Output device<span class="caret"></span>');
 											return;
 										}
 										// Any loss?
@@ -326,52 +205,18 @@ $(document).ready(function() {
 									}
 								},
 								onlocalstream: function(stream) {
-									Janus.debug(" ::: Got a local stream :::", stream);
-									if($('#myvideo').length === 0) {
-										$('#videos').removeClass('hide').show();
-										$('#videoleft').append('<video class="rounded centered" id="myvideo" width="100%" height="100%" autoplay playsinline muted="muted"/>');
-									}
-									Janus.attachMediaStream($('#myvideo').get(0), stream);
-									$("#myvideo").get(0).muted = "muted";
+									// We ignore the stream we got here, we're using the canvas to render it
 									if(echotest.webrtcStuff.pc.iceConnectionState !== "completed" &&
 											echotest.webrtcStuff.pc.iceConnectionState !== "connected") {
-										// No remote video yet
-										$('#videoright').append('<video class="rounded centered" id="waitingvideo" width="100%" height="100%" />');
-										if(spinner == null) {
-											var target = document.getElementById('videoright');
-											spinner = new Spinner({top:100}).spin(target);
-										} else {
-											spinner.spin();
-										}
-										var videoTracks = stream.getVideoTracks();
-										if(!videoTracks || videoTracks.length === 0) {
-											// No webcam
-											$('#myvideo').hide();
-											$('#videoleft').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No webcam available</span>' +
-												'</div>');
-										}
+										$("#videoleft").parent().block({
+											message: '<b>Publishing...</b>',
+											css: {
+												border: 'none',
+												backgroundColor: 'transparent',
+												color: 'white'
+											}
+										});
 									}
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No webcam
-										$('#myvideo').hide();
-										if($('#videoleft .no-video-container').length === 0) {
-											$('#videoleft').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No webcam available</span>' +
-												'</div>');
-										}
-									} else {
-										$('#videoleft .no-video-container').remove();
-										$('#myvideo').removeClass('hide').show();
-									}
-									// Reset devices controls
-									$('#audio-device, #video-device').removeAttr('disabled');
-									$('#change-devices').removeAttr('disabled');
 								},
 								onremotestream: function(stream) {
 									Janus.debug(" ::: Got a remote stream :::", stream);
@@ -414,7 +259,7 @@ $(document).ready(function() {
 									// Enable audio/video buttons and bitrate limiter
 									audioenabled = true;
 									videoenabled = true;
-									$('#toggleaudio').removeAttr('disabled').click(
+									$('#toggleaudio').click(
 										function() {
 											audioenabled = !audioenabled;
 											if(audioenabled)
@@ -423,7 +268,7 @@ $(document).ready(function() {
 												$('#toggleaudio').html("Enable audio").removeClass("btn-danger").addClass("btn-success");
 											echotest.send({ message: { audio: audioenabled }});
 										});
-									$('#togglevideo').removeAttr('disabled').click(
+									$('#togglevideo').click(
 										function() {
 											videoenabled = !videoenabled;
 											if(videoenabled)
@@ -433,7 +278,7 @@ $(document).ready(function() {
 											echotest.send({ message: { video: videoenabled }});
 										});
 									$('#toggleaudio').parent().removeClass('hide').show();
-									$('#bitrate a').removeAttr('disabled').click(function() {
+									$('#bitrate a').click(function() {
 										var id = $(this).attr("id");
 										var bitrate = parseInt(id)*1000;
 										if(bitrate === 0) {
@@ -460,38 +305,23 @@ $(document).ready(function() {
 										}, 1000);
 									}
 								},
-								ondataopen: function(data) {
-									Janus.log("The DataChannel is available!");
-									$('#videos').removeClass('hide').show();
-									$('#datasend').removeAttr('disabled');
-								},
-								ondata: function(data) {
-									Janus.debug("We got data from the DataChannel!", data);
-									$('#datarecv').val(data);
-								},
 								oncleanup: function() {
 									Janus.log(" ::: Got a cleanup notification :::");
 									if(spinner)
 										spinner.stop();
 									spinner = null;
-									$('#myvideo').remove();
-									$('#waitingvideo').remove();
-									$('#peervideo').remove();
-									$('.no-video-container').remove();
-									audioenabled = true;
-									$('#toggleaudio').attr('disabled', true).html("Disable audio").removeClass("btn-success").addClass("btn-danger");
-									videoenabled = true;
-									$('#togglevideo').attr('disabled', true).html("Disable video").removeClass("btn-success").addClass("btn-danger");
-									$('#bitrate').attr('disabled', true);
-									$('#bitrateset').html('Bandwidth<span class="caret"></span>');
-									$('#curbitrate').hide();
 									if(bitrateTimer)
 										clearInterval(bitrateTimer);
 									bitrateTimer = null;
+									$('#myvideo').remove();
+									$('#waitingvideo').remove();
+									$("#videoleft").parent().unblock();
+									$('#peervideo').remove();
+									$('#toggleaudio').attr('disabled', true);
+									$('#togglevideo').attr('disabled', true);
+									$('#bitrate').attr('disabled', true);
+									$('#curbitrate').hide();
 									$('#curres').hide();
-									$('#datasend').val('').attr('disabled', true);
-									$('#datarecv').val('');
-									$('#outputdeviceset').html('Output device<span class="caret"></span>');
 									simulcastStarted = false;
 									$('#simulcast').remove();
 								}
@@ -514,25 +344,115 @@ $(document).ready(function() {
 function checkEnter(event) {
 	var theCode = event.keyCode ? event.keyCode : event.which ? event.which : event.charCode;
 	if(theCode == 13) {
-		sendData();
+		updateCanvas();
 		return false;
 	} else {
 		return true;
 	}
 }
 
-function sendData() {
-	var data = $('#datasend').val();
-	if(data === "") {
-		bootbox.alert('Insert a message to send on the DataChannel');
-		return;
-	}
-	echotest.data({
-		text: data,
-		error: function(reason) { bootbox.alert(reason); },
-		success: function() { $('#datasend').val(''); },
-	});
+// Helper function to create (and populate) our canvas element
+function createCanvas() {
+	// Predefined tweaks
+	$('#text').val(myText);
+	$('#color').val(myColor);
+	$('#font').val(myFont);
+	$('#posX').val(""+myX);
+	$('#posY').val(""+myY);
+	// Capture the local webcam
+	navigator.mediaDevices.getUserMedia(
+		{
+			audio: true,
+			video: {
+				width: { ideal: 432 },
+				height: { ideal: 240 }
+			}
+		})
+		.then(function(stream) {
+			// We have our video
+			Janus.debug(stream);
+			Janus.attachMediaStream($('#myvideo').get(0), stream);
+			$('#myvideo').get(0).muted = "muted";
+			$('#myvideo').get(0).play();
+			// Let's setup the canvas, now
+			$('#myvideo').get(0).addEventListener('play', function () {
+				var myvideo = this;
+				var canvas = document.getElementById('canvas');
+				var context = canvas.getContext('2d');
+				var logo = new Image();
+				logo.onload = function() {
+					(function loop() {
+						if(!myvideo.paused && !myvideo.ended) {
+							// Copy video to image
+							context.drawImage(myvideo, 0, 0);
+							// Add logo
+							context.drawImage(logo,
+								0, 0, logoW, logoH,
+								logoX, logoY, logoW*logoS, logoH*logoS);
+							// Add some text
+							context.fillStyle = 'rgba(0,0,0,0.5)';
+							context.fillRect(0, 190, 432,240);
+							context.font = myFont;
+							context.fillStyle = myColor;
+							context.fillText(myText, myX, myY);
+							// We're drawing at the specified fps
+							setTimeout(loop, 1000 / fps);
+						}
+					})();
+				};
+				logo.src = logoUrl;
+				// Capture the canvas as a local MediaStream
+				canvasStream = canvas.captureStream();
+				canvasStream.addTrack(stream.getAudioTracks()[0]);
+				// Now that the stream is ready, we can create the PeerConnection
+				var body = { audio: true, video: true };
+				// We can try and force a specific codec, by telling the plugin what we'd prefer
+				// For simplicity, you can set it via a query string (e.g., ?vcodec=vp9)
+				if(acodec)
+					body["audiocodec"] = acodec;
+				if(vcodec)
+					body["videocodec"] = vcodec;
+				// For the codecs that support them (VP9 and H.264) you can specify a codec
+				// profile as well (e.g., ?vprofile=2 for VP9, or ?vprofile=42e01f for H.264)
+				if(vprofile)
+					body["videoprofile"] = vprofile;
+				Janus.debug("Sending message:", body);
+				echotest.send({ message: body });
+				Janus.debug("Trying a createOffer too (audio/video sendrecv)");
+				echotest.createOffer(
+					{
+						stream: canvasStream,	// Let's pass the canvas MediaStream
+						// If you want to test simulcasting (Chrome and Firefox only), then
+						// pass a ?simulcast=true when opening this demo page: it will turn
+						// the following 'simulcast' property to pass to janus.js to true
+						simulcast: doSimulcast,
+						simulcast2: doSimulcast2,
+						success: function(jsep) {
+							Janus.debug("Got SDP!", jsep);
+							echotest.send({ message: body, jsep: jsep });
+						},
+						error: function(error) {
+							Janus.error("WebRTC error:", error);
+							bootbox.alert("WebRTC error... " + error.message);
+						}
+					});
+
+			}, 0);
+		})
+		.catch(function(error) {
+			Janus.error(error);
+			bootbox.alert(error);
+		});
 }
+// Helper function to update a canvas when the tweaks are used
+function updateCanvas() {
+	myText = $('#text').val();
+	myColor = $('#color').val();
+	myFont = $('#font').val();
+	myX = parseInt($('#posX').val());
+	myY = parseInt($('#posY').val());
+}
+
 
 // Helper to parse query string
 function getQueryStringValue(name) {
@@ -544,7 +464,8 @@ function getQueryStringValue(name) {
 
 // Helpers to create Simulcast-related UI, if enabled
 function addSimulcastButtons(temporal) {
-	$(	'<div id="simulcast" class="btn-group-vertical btn-group-vertical-xs pull-right">' +
+	$('#curres').parent().append(
+		'<div id="simulcast" class="btn-group-vertical btn-group-vertical-xs pull-right">' +
 		'	<div class"row">' +
 		'		<div class="btn-group btn-group-xs" style="width: 100%">' +
 		'			<button id="sl-2" type="button" class="btn btn-primary" data-toggle="tooltip" title="Switch to higher quality" style="width: 33%">SL 2</button>' +
@@ -559,7 +480,7 @@ function addSimulcastButtons(temporal) {
 		'			<button id="tl-0" type="button" class="btn btn-primary" data-toggle="tooltip" title="Cap to temporal layer 0" style="width: 33%">TL 0</button>' +
 		'		</div>' +
 		'	</div>' +
-		'</div>').insertBefore('#output-devices');
+		'</div>');
 	// Enable the simulcast selection buttons
 	$('#sl-0').removeClass('btn-primary btn-success').addClass('btn-primary')
 		.unbind('click').click(function() {
